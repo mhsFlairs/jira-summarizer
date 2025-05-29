@@ -403,37 +403,6 @@ def chat_about_tickets(tickets, chat_model):
                             "Could not reinitialize the agent. Please restart the chat."
                         )
 
-
-# 3. Remove the duplicate UI code from chat_about_tickets function
-# The code below should be removed from chat_about_tickets:
-#
-# col1, col2 = st.columns([1, 5])
-# with col1:
-#     if st.button(
-#         "Start Chat" if not st.session_state.chat_enabled else "End Chat"
-#     ):
-#         st.session_state.chat_enabled = not st.session_state.chat_enabled
-#         # Reset agent when toggling chat
-#         if "agent" in st.session_state:
-#             del st.session_state.agent
-#         if "agent_messages" in st.session_state:
-#             st.session_state.agent_messages = []
-#         st.rerun()
-#
-# if st.session_state.chat_enabled and st.session_state.current_tickets:
-#     chat_model = initialize_chat_agent()
-#     if chat_model:
-#         st.write(
-#             "You can now chat about the tickets or ask for a stakeholder report:"
-#         )
-#         st.info(
-#             "Try asking: 'Please prepare a stakeholder report' or 'Generate a report for management'"
-#         )
-#         chat_about_tickets(st.session_state.current_tickets, chat_model)
-#     else:
-#         st.error("Failed to initialize chat agent")
-
-
 # 4. Fix the display_tickets_table function with proper key for the button
 def display_tickets_table(tickets):
     """
