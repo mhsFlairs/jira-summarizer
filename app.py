@@ -69,17 +69,21 @@ def chat_about_tickets(tickets, chat_model):
 
     with chat_container:
         # Display chat history
-        for message in st.session_state.messages[1:]:  # Skip the system message
+        messages_to_display = st.session_state.messages[1:]  # Skip the system message
+        for message in messages_to_display:
             if isinstance(message, HumanMessage):
-                st.chat_message("user").write(message.content)
+                with st.chat_message("user"):
+                    st.write(message.content)
             elif isinstance(message, AIMessage):
-                st.chat_message("assistant").write(message.content)
+                with st.chat_message("assistant"):
+                    st.write(message.content)
 
-        # Get user input
-        if prompt := st.chat_input("Ask me about the tickets...", key="chat_input"):
+        # Get user input at the bottom
+        prompt = st.chat_input("Ask me about the tickets...", key="chat_input")
+
+        if prompt:
             # Add user message to chat history
             st.session_state.messages.append(HumanMessage(content=prompt))
-            st.chat_message("user").write(prompt)
 
             # Prepare context about tickets
             ticket_context = "\n".join(
@@ -98,7 +102,9 @@ def chat_about_tickets(tickets, chat_model):
 
                 # Add AI response to chat history
                 st.session_state.messages.append(AIMessage(content=response))
-                st.chat_message("assistant").write(response)
+
+                # Rerun to update the chat display
+                st.rerun()
             except Exception as e:
                 logger.error(f"Error in chat response: {e}")
                 st.error("Failed to get response from chat agent")
