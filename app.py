@@ -406,17 +406,27 @@ def chat_about_tickets(tickets, chat_model):
                         st.write(response_text)
 
                         # If this is a stakeholder report, offer download option
+                        # But don't reset the conversation - allow continued refinement
                         if (
                             "stakeholder report" in prompt.lower()
                             and len(response_text) > 500
                         ):
+                            # Generate a unique key for each download button based on timestamp
+                            download_key = f"download_report_button_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+
                             st.download_button(
                                 label="Download Report",
                                 data=response_text,
                                 file_name=f"stakeholder_report_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
                                 mime="text/markdown",
-                                key="download_report_button",
+                                key=download_key,
                             )
+
+                            # Add a helpful hint for users to continue the conversation
+                            st.info(
+                                "You can continue the conversation to refine this report. Try asking for specific changes or additions."
+                            )
+
                 except Exception as e:
                     logger.error(f"Error in agent response: {e}")
                     st.error(f"Failed to get response from the agent: {str(e)}")
