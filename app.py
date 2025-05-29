@@ -3,12 +3,13 @@ import logging
 import streamlit as st
 from dotenv import load_dotenv
 from jira import JIRA
-from langchain.chat_models import AzureChatOpenAI
 from langchain.schema import SystemMessage, HumanMessage, AIMessage
 import pandas as pd
 from datetime import datetime
-from typing import Dict, List, Optional
-from functools import lru_cache
+from langchain.agents import Tool, AgentExecutor, create_openai_tools_agent
+from langchain.memory import ConversationBufferMemory
+from langchain_community.chat_models import AzureChatOpenAI
+
 
 # Set up logging
 logging.basicConfig(
@@ -53,61 +54,61 @@ def initialize_session_state():
             st.session_state[key] = default_value
 
 
-def chat_about_tickets(tickets, chat_model):
+def generate_stakeholder_report(tickets):
     """
-    Handles chat interactions about the displayed tickets.
+    Generates a comprehensive stakeholder report based on the provided tickets.
+
+    Args:
+        tickets: JIRA ticket objects to analyze
+
+    Returns:
+        str: A formatted stakeholder report
     """
-    if "messages" not in st.session_state:
-        st.session_state.messages = [
-            SystemMessage(
-                content="You are a helpful assistant that can discuss Jira tickets and provide insights about them."
-            )
+    try:
+        if not tickets:
+            return "No tickets available to generate a report."
+
+        # Extract relevant ticket data
+        ticket_data = [
+            extract_ticket_data(ticket, include_details=True) for ticket in tickets
         ]
+        ticket_data = [data for data in ticket_data if data is not None]
 
-    # Create a container for the chat interface
-    chat_container = st.container()
+        # Format tickets for the prompt
+        formatted_tickets = []
+        for data in ticket_data:
+            ticket_info = [
+                f"Key: {data['Key']}",
+                f"Summary: {data['Summary']}",
+                f"Status: {data['Status']}",
+                f"Priority: {data['Priority']}",
+                f"Assignee: {data['Assignee']}",
+                f"Updated: {data['Updated']}",
+            ]
 
-    with chat_container:
-        # Display chat history
-        messages_to_display = st.session_state.messages[1:]  # Skip the system message
-        for message in messages_to_display:
-            if isinstance(message, HumanMessage):
-                with st.chat_message("user"):
-                    st.write(message.content)
-            elif isinstance(message, AIMessage):
-                with st.chat_message("assistant"):
-                    st.write(message.content)
+            if "Description" in data and data["Description"]:
+                ticket_info.append(f"Description: {data['Description']}")
 
-        # Get user input at the bottom
-        prompt = st.chat_input("Ask me about the tickets...", key="chat_input")
+            if "Comments" in data and data["Comments"]:
+                comments_text = "\n".join(
+                    [f"- {comment}" for comment in data["Comments"][:3]]
+                )
+                ticket_info.append(f"Recent Comments: {comments_text}")
 
-        if prompt:
-            # Add user message to chat history
-            st.session_state.messages.append(HumanMessage(content=prompt))
+            formatted_tickets.append("\n".join(ticket_info))
 
-            # Prepare context about tickets
-            ticket_context = "\n".join(
-                [
-                    f"Ticket {data['Key']}: {data['Summary']} (Status: {data['Status']})"
-                    for data in [extract_ticket_data(ticket) for ticket in tickets]
-                ]
-            )
+        tickets_text = "\n\n".join(formatted_tickets)
 
-            # Prepare full prompt with context
-            full_prompt = f"Context about current tickets:\n{ticket_context}\n\nUser question: {prompt}"
+        # Return the formatted tickets for the agent to process
+        return f"""Here are the JIRA tickets to analyze for your stakeholder report:
+        
+{tickets_text}
 
-            try:
-                # Get AI response
-                response = chat_model.predict(full_prompt)
-
-                # Add AI response to chat history
-                st.session_state.messages.append(AIMessage(content=response))
-
-                # Rerun to update the chat display
-                st.rerun()
-            except Exception as e:
-                logger.error(f"Error in chat response: {e}")
-                st.error("Failed to get response from chat agent")
+Please use this information to create a comprehensive stakeholder report.
+"""
+    except Exception as e:
+        logger.error(f"Error generating stakeholder report data: {e}")
+        return f"Error generating stakeholder report: {str(e)}"
 
 
 def get_jira_connection():
@@ -217,6 +218,218 @@ def initialize_chat_agent():
         return None
 
 
+# 1. Fix the system_message in create_jira_agent function (convert string to SystemMessage)
+def create_jira_agent(chat_model, tickets):
+    """
+    Creates an agent with tools for analyzing JIRA tickets.
+    """
+    try:
+        # Define tools
+        tools = [
+            Tool(
+                name="generate_stakeholder_report",
+                func=lambda _: generate_stakeholder_report(tickets),
+                description="Generates a comprehensive stakeholder report based on the current JIRA tickets. Use this when asked to create, generate, or prepare a report for stakeholders or management.",
+            )
+        ]
+
+        # Define agent prompt using ChatPromptTemplate instead of SystemMessage
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    """You are a helpful JIRA analysis assistant that can discuss Jira tickets and provide insights about them.
+When asked to generate a stakeholder report, use the generate_stakeholder_report tool to get ticket data, then analyze it and create a professional report with the following sections:
+
+1. Executive Summary
+- High-level overview of project progress
+- Key achievements in this period
+- Critical milestones reached
+
+2. Project Status Overview
+- Overall project health (On Track/At Risk/Delayed)
+- Current phase of the project
+- Percentage of completion against planned timeline
+
+3. Key Deliverables Status
+- Completed deliverables with brief descriptions
+- In-progress items with expected completion dates
+- Upcoming major deliverables
+- Any changes to agreed scope
+
+4. Risk and Issues
+- Current blocking issues
+- Potential risks identified
+- Mitigation strategies in place
+
+5. Timeline and Milestones
+- Major milestones achieved
+- Next important dates
+- Any schedule variations
+
+6. Resource Utilization
+- Team capacity and allocation
+- Any resource constraints or needs
+
+7. Next Steps
+- Priority items for next period
+- Required decisions or support needed
+- Upcoming key activities
+
+Use clear, professional language and format the report in a way that's easily digestible for senior stakeholders.
+Include relevant metrics and KPIs where available. Highlight any items requiring immediate attention or executive decision-making.
+""",
+                ),
+                MessagesPlaceholder(variable_name="chat_history"),
+                ("human", "{input}"),
+                MessagesPlaceholder(variable_name="agent_scratchpad"),
+            ]
+        )
+
+        # Create agent
+        agent = create_openai_tools_agent(chat_model, tools, prompt)
+
+        # Set up memory
+        memory = ConversationBufferMemory(
+            memory_key="chat_history", return_messages=True
+        )
+
+        # Create agent executor
+        agent_executor = AgentExecutor.from_agent_and_tools(
+            agent=agent,
+            tools=tools,
+            memory=memory,
+            verbose=True,
+            handle_parsing_errors=True,
+        )
+
+        return agent_executor
+
+    except Exception as e:
+        logger.error(f"Error creating JIRA agent: {e}")
+        return None
+
+
+# 2. Fix the chat_about_tickets function to remove duplicate buttons
+def chat_about_tickets(tickets, chat_model):
+    """
+    Handles chat interactions about the displayed tickets using an agent with tools.
+    """
+    # Create the agent if not already in session state
+    if "agent" not in st.session_state:
+        agent = create_jira_agent(chat_model, tickets)
+        if agent is None:
+            st.error("Failed to create agent. Please try again.")
+            return
+        st.session_state.agent = agent
+
+    if "agent_messages" not in st.session_state:
+        st.session_state.agent_messages = []
+
+    # Create a container for the chat interface
+    chat_container = st.container()
+
+    with chat_container:
+        # Display chat history
+        for message in st.session_state.agent_messages:
+            with st.chat_message("user" if message["role"] == "user" else "assistant"):
+                st.write(message["content"])
+
+        # Get user input at the bottom
+        prompt = st.chat_input(
+            "Ask about tickets or request a stakeholder report...",
+            key="agent_chat_input",
+        )
+
+        if prompt:
+            # Add user message to chat history
+            st.session_state.agent_messages.append({"role": "user", "content": prompt})
+
+            # Display user message
+            with st.chat_message("user"):
+                st.write(prompt)
+
+            # Process with agent
+            with st.spinner("Thinking..."):
+                try:
+                    # Check if agent exists and is valid
+                    if st.session_state.agent is None:
+                        raise ValueError("Agent is not initialized")
+
+                    response = st.session_state.agent.run(prompt)
+
+                    # Add AI response to chat history
+                    st.session_state.agent_messages.append(
+                        {"role": "assistant", "content": response}
+                    )
+
+                    # Display AI response
+                    with st.chat_message("assistant"):
+                        st.write(response)
+
+                        # If this is a stakeholder report, offer download option
+                        if (
+                            "stakeholder report" in prompt.lower()
+                            and len(response) > 500
+                        ):
+                            st.download_button(
+                                label="Download Report",
+                                data=response,
+                                file_name=f"stakeholder_report_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                                mime="text/markdown",
+                                key="download_report_button",
+                            )
+                except Exception as e:
+                    logger.error(f"Error in agent response: {e}")
+                    st.error(f"Failed to get response from the agent: {str(e)}")
+
+                    # Try to reinitialize the agent
+                    st.warning("Attempting to reinitialize the agent...")
+                    if "agent" in st.session_state:
+                        del st.session_state.agent
+                    new_agent = create_jira_agent(chat_model, tickets)
+                    if new_agent:
+                        st.session_state.agent = new_agent
+                        st.success(
+                            "Agent reinitialized. Please try your question again."
+                        )
+                    else:
+                        st.error(
+                            "Could not reinitialize the agent. Please restart the chat."
+                        )
+
+
+# 3. Remove the duplicate UI code from chat_about_tickets function
+# The code below should be removed from chat_about_tickets:
+#
+# col1, col2 = st.columns([1, 5])
+# with col1:
+#     if st.button(
+#         "Start Chat" if not st.session_state.chat_enabled else "End Chat"
+#     ):
+#         st.session_state.chat_enabled = not st.session_state.chat_enabled
+#         # Reset agent when toggling chat
+#         if "agent" in st.session_state:
+#             del st.session_state.agent
+#         if "agent_messages" in st.session_state:
+#             st.session_state.agent_messages = []
+#         st.rerun()
+#
+# if st.session_state.chat_enabled and st.session_state.current_tickets:
+#     chat_model = initialize_chat_agent()
+#     if chat_model:
+#         st.write(
+#             "You can now chat about the tickets or ask for a stakeholder report:"
+#         )
+#         st.info(
+#             "Try asking: 'Please prepare a stakeholder report' or 'Generate a report for management'"
+#         )
+#         chat_about_tickets(st.session_state.current_tickets, chat_model)
+#     else:
+#         st.error("Failed to initialize chat agent")
+
+
+# 4. Fix the display_tickets_table function with proper key for the button
 def display_tickets_table(tickets):
     """
     Displays tickets in a table format and provides chat option.
@@ -241,22 +454,33 @@ def display_tickets_table(tickets):
         col1, col2 = st.columns([1, 5])
         with col1:
             if st.button(
-                "Start Chat" if not st.session_state.chat_enabled else "End Chat"
+                "Start Chat" if not st.session_state.chat_enabled else "End Chat",
+                key="toggle_chat_button",  # Add unique key to fix the button ID error
             ):
                 st.session_state.chat_enabled = not st.session_state.chat_enabled
+                # Reset agent when toggling chat
+                if "agent" in st.session_state:
+                    del st.session_state.agent
+                if "agent_messages" in st.session_state:
+                    st.session_state.agent_messages = []
                 st.rerun()
 
         if st.session_state.chat_enabled and st.session_state.current_tickets:
             chat_model = initialize_chat_agent()
             if chat_model:
-                st.write("You can now chat about the displayed tickets:")
+                st.write(
+                    "You can now chat about the tickets or ask for a stakeholder report:"
+                )
+                st.info(
+                    "Try asking: 'Please prepare a stakeholder report' or 'Generate a report for management'"
+                )
                 chat_about_tickets(st.session_state.current_tickets, chat_model)
             else:
                 st.error("Failed to initialize chat agent")
 
     except Exception as e:
         logger.error(f"Error displaying tickets table: {e}")
-        st.error("Error displaying tickets table")
+        st.error(f"Error displaying tickets table: {str(e)}")
 
 
 def manage_query_history():
