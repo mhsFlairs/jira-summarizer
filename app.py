@@ -367,23 +367,42 @@ def chat_about_tickets(tickets, chat_model):
         # Display chat history
         for message in st.session_state.agent_messages:
             with st.chat_message("user" if message["role"] == "user" else "assistant"):
-                st.write(message["content"])
+                # Use markdown to make text selectable/copyable
+                st.markdown(message["content"])
 
-        # Get user input at the bottom
-        prompt = st.chat_input(
-            "Ask about tickets or request a stakeholder report...",
-            key="agent_chat_input",
-        )
+                # If this was an assistant message with a stakeholder report, add download button
+                if (
+                    message["role"] == "assistant"
+                    and any(
+                        term in st.session_state.agent_messages[-2]["content"].lower()
+                        for term in [
+                            "stakeholder report",
+                            "generate report",
+                            "create report",
+                        ]
+                    )
+                    if len(st.session_state.agent_messages) >= 2
+                    else False and len(message["content"]) > 500
+                ):
+                    # Generate a unique key for each download button based on message index
+                    download_key = f"download_report_button_{st.session_state.agent_messages.index(message)}"
 
-        if prompt:
-            # Add user message to chat history
-            st.session_state.agent_messages.append({"role": "user", "content": prompt})
+                    # Add copy button for the content
+                    col1, col2 = st.columns([1, 3])
+                    with col1:
+                        st.download_button(
+                            label="Download Report",
+                            data=message["content"],
+                            file_name=f"stakeholder_report_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
+                            mime="text/markdown",
+                            key=download_key,
+                        )
 
-            # Display user message
-            with st.chat_message("user"):
-                st.write(prompt)
+        # Process with agent when there's a new prompt
+        if "current_prompt" in st.session_state and st.session_state.current_prompt:
+            prompt = st.session_state.current_prompt
+            st.session_state.current_prompt = None  # Clear the prompt after processing
 
-            # Process with agent
             with st.spinner("Thinking..."):
                 try:
                     # Check if agent exists and is valid
@@ -403,16 +422,23 @@ def chat_about_tickets(tickets, chat_model):
 
                     # Display AI response
                     with st.chat_message("assistant"):
-                        st.write(response_text)
+                        # Use markdown to make text selectable/copyable
+                        st.markdown(response_text)
 
                         # If this is a stakeholder report, offer download option
-                        # But don't reset the conversation - allow continued refinement
                         if (
-                            "stakeholder report" in prompt.lower()
+                            any(
+                                term in prompt.lower()
+                                for term in [
+                                    "stakeholder report",
+                                    "generate report",
+                                    "create report",
+                                ]
+                            )
                             and len(response_text) > 500
                         ):
-                            # Generate a unique key for each download button based on timestamp
-                            download_key = f"download_report_button_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+                            # Generate a unique key for download button
+                            download_key = f"download_report_button_{len(st.session_state.agent_messages)}"
 
                             st.download_button(
                                 label="Download Report",
@@ -431,20 +457,55 @@ def chat_about_tickets(tickets, chat_model):
                     logger.error(f"Error in agent response: {e}")
                     st.error(f"Failed to get response from the agent: {str(e)}")
 
-                    # Try to reinitialize the agent
-                    st.warning("Attempting to reinitialize the agent...")
+                    # Try to reinitialize the agent while preserving conversation history
+                    st.warning(
+                        "Attempting to reinitialize the agent while preserving conversation..."
+                    )
+
+                    # Store the conversation history before recreating the agent
+                    conversation_history = (
+                        st.session_state.agent_messages.copy()
+                        if "agent_messages" in st.session_state
+                        else []
+                    )
+
                     if "agent" in st.session_state:
                         del st.session_state.agent
+
                     new_agent = create_jira_agent(chat_model, tickets)
                     if new_agent:
                         st.session_state.agent = new_agent
+                        # Keep the conversation history
+                        st.session_state.agent_messages = conversation_history
                         st.success(
-                            "Agent reinitialized. Please try your question again."
+                            "Agent reinitialized with conversation history preserved. Please try your question again."
                         )
                     else:
                         st.error(
-                            "Could not reinitialize the agent. Please restart the chat."
+                            "Could not reinitialize the agent. Please try refreshing the page."
                         )
+
+                # Always rerun to update the UI with new messages
+                st.rerun()
+
+        # Get user input at the bottom - ALWAYS after the chat history and responses
+        prompt = st.chat_input(
+            "Ask about tickets or request a stakeholder report...",
+            key="agent_chat_input",
+        )
+
+        if prompt:
+            # Add user message to chat history
+            st.session_state.agent_messages.append({"role": "user", "content": prompt})
+
+            # Store prompt in session state for processing after rerun
+            st.session_state.current_prompt = prompt
+
+            # Display user message and rerun to process the message
+            with st.chat_message("user"):
+                st.markdown(prompt)
+
+            st.rerun()
 
 
 # 4. Fix the display_tickets_table function with proper key for the button
