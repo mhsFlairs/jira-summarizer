@@ -54,12 +54,13 @@ def initialize_session_state():
             st.session_state[key] = default_value
 
 
-def generate_stakeholder_report(tickets):
+def generate_stakeholder_report(tickets, conversation_history=None):
     """
     Generates a comprehensive stakeholder report based on the provided tickets.
 
     Args:
         tickets: JIRA ticket objects to analyze
+        conversation_history: Optional previous conversation for context
 
     Returns:
         str: A formatted stakeholder report
@@ -99,12 +100,29 @@ def generate_stakeholder_report(tickets):
 
         tickets_text = "\n\n".join(formatted_tickets)
 
+        # Include conversation context if available
+        context = ""
+        if conversation_history:
+            # Format the last few conversation turns for context
+            context_messages = (
+                conversation_history[-3:]
+                if len(conversation_history) > 3
+                else conversation_history
+            )
+            context = "\n\nConversation context:\n" + "\n".join(
+                [
+                    f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+                    for msg in context_messages
+                ]
+            )
+
         # Return the formatted tickets for the agent to process
         return f"""Here are the JIRA tickets to analyze for your stakeholder report:
         
 {tickets_text}
+{context}
 
-Please use this information to create a comprehensive stakeholder report.
+Based on the above information, please create a comprehensive stakeholder report without asking for additional information.
 """
     except Exception as e:
         logger.error(f"Error generating stakeholder report data: {e}")
@@ -219,21 +237,26 @@ def initialize_chat_agent():
 
 
 # 1. Fix the system_message in create_jira_agent function (convert string to SystemMessage)
+
+
+# 2. Update the create_jira_agent function to pass conversation history to the tool
 def create_jira_agent(chat_model, tickets):
     """
     Creates an agent with tools for analyzing JIRA tickets.
     """
     try:
-        # Define tools
+        # Define tools that pass conversation history
         tools = [
             Tool(
                 name="generate_stakeholder_report",
-                func=lambda _: generate_stakeholder_report(tickets),
+                func=lambda _: generate_stakeholder_report(
+                    tickets, st.session_state.get("agent_messages", [])
+                ),
                 description="Generates a comprehensive stakeholder report based on the current JIRA tickets. Use this when asked to create, generate, or prepare a report for stakeholders or management.",
             )
         ]
 
-        # Define agent prompt using ChatPromptTemplate instead of SystemMessage
+        # Define agent prompt using ChatPromptTemplate
         prompt = ChatPromptTemplate.from_messages(
             [
                 (
@@ -278,6 +301,8 @@ When asked to generate a stakeholder report, use the generate_stakeholder_report
 
 Use clear, professional language and format the report in a way that's easily digestible for senior stakeholders.
 Include relevant metrics and KPIs where available. Highlight any items requiring immediate attention or executive decision-making.
+
+IMPORTANT: The user has already provided all necessary information about the tickets. Do not ask for additional information or clarification - use what is available to create the best possible report.
 """,
                 ),
                 MessagesPlaceholder(variable_name="chat_history"),
@@ -289,10 +314,18 @@ Include relevant metrics and KPIs where available. Highlight any items requiring
         # Create agent
         agent = create_openai_tools_agent(chat_model, tools, prompt)
 
-        # Set up memory
+        # Set up memory with existing conversation if available
         memory = ConversationBufferMemory(
             memory_key="chat_history", return_messages=True
         )
+
+        # Pre-populate memory with existing conversation
+        if "agent_messages" in st.session_state and st.session_state.agent_messages:
+            for message in st.session_state.agent_messages:
+                if message["role"] == "user":
+                    memory.chat_memory.add_user_message(message["content"])
+                else:
+                    memory.chat_memory.add_ai_message(message["content"])
 
         # Create agent executor
         agent_executor = AgentExecutor.from_agent_and_tools(
@@ -402,6 +435,7 @@ def chat_about_tickets(tickets, chat_model):
                         st.error(
                             "Could not reinitialize the agent. Please restart the chat."
                         )
+
 
 # 4. Fix the display_tickets_table function with proper key for the button
 def display_tickets_table(tickets):
