@@ -1,4 +1,5 @@
 import os
+import logging
 import streamlit as st
 from dotenv import load_dotenv
 from jira import JIRA
@@ -7,6 +8,14 @@ from langchain.agents import initialize_agent, Tool
 from langchain.memory import ConversationBufferMemory
 import pandas as pd
 from datetime import datetime
+from typing import Dict, List, Optional
+from functools import lru_cache
+
+# Set up logging
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
@@ -19,393 +28,205 @@ AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME")
 
-# Initialize session state
-if "query_history" not in st.session_state:
-    st.session_state.query_history = []
-if "JQL_QUERY" not in st.session_state:
-    st.session_state.JQL_QUERY = ""
-if "PROJECT_KEY" not in st.session_state:
-    st.session_state.PROJECT_KEY = ""
-if "PROJECT_DISPLAY_NAME" not in st.session_state:
-    st.session_state.PROJECT_DISPLAY_NAME = ""
+# Constants
+ITEMS_PER_PAGE = 10
+MAX_HISTORY_ITEMS = 50
+MAX_QUERY_LENGTH = 500
 
 
-def get_available_projects():
-    try:
-        jira = JIRA(server=JIRA_SERVER, basic_auth=(JIRA_USER, JIRA_API_TOKEN))
-        projects = {}
-        for project in jira.projects():
-            display_name = f"{project.name} [{project.key}]"
-            projects[display_name] = {"key": project.key, "name": project.name}
-        return projects
-    except Exception as e:
-        st.error(f"Error fetching projects: {str(e)}")
-        return {}
-
-
-def extract_jql_from_query(query: str) -> str:
-    prompt = f"""
-    Convert the following natural language query into a Jira JQL query.
-    Only return the JQL query without any additional text or explanation.
-    
-    Query: {query}
-    
-    Follow these rules:
-    1. Use proper Jira JQL syntax
-    2. Include relevant fields like project, status, priority, etc.
-    3. Use appropriate operators (=, !=, IN, AND, OR, etc.)
-    4. Add proper ordering if mentioned (ORDER BY)
-    
-    JQL:
+def initialize_session_state():
     """
+    Initializes or resets session state variables.
+    """
+    default_states = {
+        "query_history": [],
+        "JQL_QUERY": "",
+        "max_results": 100,
+        "timeout": 30,
+        "temperature": 0.0,
+        "page_number": 1,
+    }
 
+    for key, default_value in default_states.items():
+        if key not in st.session_state:
+            st.session_state[key] = default_value
+
+
+def get_jira_connection():
+    """
+    Creates and returns a JIRA connection.
+    Returns: JIRA connection object
+    """
     try:
-        jql = llm.predict(prompt).strip()
-        return jql
+        return JIRA(server=JIRA_SERVER, basic_auth=(JIRA_USER, JIRA_API_TOKEN))
     except Exception as e:
-        st.error(f"Error extracting JQL: {str(e)}")
-        return None
-
+        logger.error(f"Failed to establish JIRA connection: {e}")
+        raise
 
 def validate_jql(jql: str) -> bool:
+    """
+    Validates JQL syntax.
+    """
+    if not jql or not jql.strip():
+        st.warning("Please enter a valid JQL query")
+        logger.warning("Empty JQL query submitted")
+        return False
+
     try:
-        jira = JIRA(server=JIRA_SERVER, basic_auth=(JIRA_USER, JIRA_API_TOKEN))
+        logger.info(f"Validating JQL: {jql}")
+        jira = get_jira_connection()
         jira.search_issues(jql, maxResults=1)
         return True
     except Exception as e:
+        logger.error(f"Invalid JQL: {e}")
         st.error(f"Invalid JQL: {str(e)}")
         return False
 
 
-# === Extract Jira tickets ===
-@st.cache_data
-def load_tickets():
+def load_jira_tickets(jql_query: str, max_results: int, expanded: bool = False):
+    """
+    Common function to load JIRA tickets.
+    """
     try:
-        with st.spinner("Loading tickets..."):
-            jira = JIRA(server=JIRA_SERVER, basic_auth=(JIRA_USER, JIRA_API_TOKEN))
-            issues = jira.search_issues(
-                st.session_state.JQL_QUERY,
-                maxResults=st.session_state.max_results,
-                expand="renderedFields",
-            )
+        logger.info(f"Fetching tickets with JQL: {jql_query}")
+        jira = get_jira_connection()
 
-            if not issues:
-                st.warning("No tickets found for the current query.")
-                return ""
-
-            FIELD_MAP = {
-                "id": "key",
-                "summary": "fields.summary",
-                "description": "fields.description",
-                "comments": "fields.comment.comments",
-                "status": "fields.status.name",
-                "parent": "fields.parent.key",
-                "resolution": "fields.resolution.name",
-            }
-
-            def extract_fields(issue):
-                result = {}
-                for field, path in FIELD_MAP.items():
-                    try:
-                        val = issue
-                        for part in path.split("."):
-                            val = (
-                                getattr(val, part)
-                                if hasattr(val, part)
-                                else val.get(part)
-                            )
-                        if field == "comments":
-                            val = "\n".join(c.body for c in val) if val else ""
-                        result[field] = str(val) if val else ""
-                    except Exception:
-                        result[field] = ""
-                return result
-
-            ticket_summaries = []
-            for issue in issues:
-                data = extract_fields(issue)
-                summary = "\n".join(f"{k}: {v}" for k, v in data.items())
-                ticket_summaries.append(summary)
-
-            return "\n\n---\n\n".join(ticket_summaries)
-    except Exception as e:
-        st.error(f"Error loading tickets: {str(e)}")
-        return ""
-
-
-def export_tickets_to_csv():
-    try:
-        jira = JIRA(server=JIRA_SERVER, basic_auth=(JIRA_USER, JIRA_API_TOKEN))
+        expand_params = ["renderedFields"] if expanded else None
         issues = jira.search_issues(
-            st.session_state.JQL_QUERY, maxResults=st.session_state.max_results
+            jql_query, maxResults=max_results, expand=expand_params
         )
 
-        data = []
-        for issue in issues:
-            data.append(
+        logger.info(f"Successfully fetched {len(issues)} tickets")
+        return issues
+    except Exception as e:
+        logger.error(f"Error loading tickets: {e}")
+        raise
+
+
+def extract_ticket_data(issue, include_details: bool = False):
+    """
+    Extracts relevant data from a JIRA issue.
+    """
+    try:
+        data = {
+            "Key": issue.key,
+            "Summary": issue.fields.summary,
+            "Status": issue.fields.status.name,
+            "Priority": issue.fields.priority.name,
+            "Assignee": (
+                str(issue.fields.assignee) if issue.fields.assignee else "Unassigned"
+            ),
+            "Updated": issue.fields.updated[:10],
+        }
+
+        if include_details:
+            data.update(
                 {
-                    "Key": issue.key,
-                    "Summary": issue.fields.summary,
-                    "Status": issue.fields.status.name,
-                    "Priority": issue.fields.priority.name,
-                    "Assignee": str(issue.fields.assignee),
-                    "Created": issue.fields.created,
+                    "Description": issue.fields.description,
+                    "Comments": (
+                        [c.body for c in issue.fields.comment.comments]
+                        if hasattr(issue.fields, "comment")
+                        else []
+                    ),
+                    "Resolution": (
+                        str(issue.fields.resolution)
+                        if issue.fields.resolution
+                        else None
+                    ),
                 }
             )
 
-        df = pd.DataFrame(data)
-        return df
+        return data
     except Exception as e:
-        st.error(f"Error exporting tickets: {str(e)}")
+        logger.error(f"Error extracting ticket data for {issue.key}: {e}")
         return None
 
 
-# Add this after export_tickets_to_csv() function
-def display_tickets_table():
+def display_tickets_table(tickets):
+    """
+    Displays tickets in a table format.
+    """
     try:
-        jira = JIRA(server=JIRA_SERVER, basic_auth=(JIRA_USER, JIRA_API_TOKEN))
-        issues = jira.search_issues(
-            st.session_state.JQL_QUERY, maxResults=st.session_state.max_results
-        )
-
-        if not issues:
+        if not tickets:
             st.warning("No tickets found for the current query.")
             return
 
-        # Prepare data for the table
-        data = []
-        for issue in issues:
-            data.append(
-                {
-                    "Key": issue.key,
-                    "Summary": issue.fields.summary,
-                    "Status": issue.fields.status.name,
-                    "Priority": issue.fields.priority.name,
-                    "Assignee": (
-                        str(issue.fields.assignee)
-                        if issue.fields.assignee
-                        else "Unassigned"
-                    ),
-                    "Updated": issue.fields.updated[:10],  # Show only the date part
-                }
-            )
+        data = [extract_ticket_data(issue) for issue in tickets]
+        data = [d for d in data if d is not None]
 
-        # Convert to DataFrame and display
         df = pd.DataFrame(data)
         st.dataframe(df, use_container_width=True)
-
-        # Display count of tickets
         st.info(f"Total tickets found: {len(data)}")
+        logger.info(f"Displayed {len(data)} tickets in table format")
 
     except Exception as e:
-        st.error(f"Error displaying tickets table: {str(e)}")
+        logger.error(f"Error displaying tickets table: {e}")
+        st.error("Error displaying tickets table")
+
+def manage_query_history():
+    """
+    Manages query history size.
+    """
+    if len(st.session_state.query_history) > MAX_HISTORY_ITEMS:
+        logger.info(f"Trimming query history to {MAX_HISTORY_ITEMS} items")
+        st.session_state.query_history = st.session_state.query_history[
+            -MAX_HISTORY_ITEMS:
+        ]
 
 
-def display_paginated_tickets(tickets):
-    tickets_list = tickets.split("\n\n---\n\n")
-    total_pages = len(tickets_list) // ITEMS_PER_PAGE + 1
-
-    st.markdown(f"Page {st.session_state.page_number} of {total_pages}")
-
-    start = (st.session_state.page_number - 1) * ITEMS_PER_PAGE
-    end = start + ITEMS_PER_PAGE
-
-    for ticket in tickets_list[start:end]:
-        with st.expander(ticket.split("\n")[0]):  # Use first line as header
-            st.text(ticket)
-
-
-def save_to_history(query, response):
+def save_to_history(jql, response):
+    """
+    Saves JQL query and response to history.
+    """
     st.session_state.query_history.append(
         {
-            "query": query,
+            "jql": jql,
             "response": response,
             "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         }
     )
+    manage_query_history()
 
 
-# === LangChain Setup ===
-llm = AzureChatOpenAI(
-    api_key=AZURE_OPENAI_API_KEY,
-    azure_endpoint=AZURE_OPENAI_ENDPOINT,
-    azure_deployment=AZURE_DEPLOYMENT_NAME,
-    api_version="2023-05-15",
-    temperature=0,
-)
+def main():
+    try:
+        st.title("Jira Project Analyst")
+
+        # Initialize session state
+        initialize_session_state()
+
+        # Sidebar settings
+        with st.sidebar:
+            st.header("Settings")
+
+            if st.button("Clear History"):
+                initialize_session_state()
+                st.success("History cleared")
+
+            st.session_state.timeout = st.slider("Query Timeout (seconds)", 10, 60, 30)
+            st.session_state.max_results = st.number_input("Max Results", 10, 500, 100)
+
+        # JQL input
+        jql_query = st.text_area("Enter JQL Query:", height=100)
+
+        if st.button("Execute JQL"):
+            if validate_jql(jql_query):
+                st.session_state.JQL_QUERY = jql_query
+                tickets = load_jira_tickets(jql_query, st.session_state.max_results)
+                display_tickets_table(tickets)
+                save_to_history(jql_query, "Query executed successfully")
+
+        # Query History
+        with st.expander("Query History"):
+            for item in reversed(st.session_state.query_history):
+                st.markdown(f"**JQL ({item['timestamp']}):** {item['jql']}")
+                st.markdown(f"**Response:** {item['response']}")
+                st.markdown("---")
+
+    except Exception as e:
+        logger.error(f"Application error: {e}")
+        st.error("An unexpected error occurred. Please try again later.")
 
 
-def query_tickets(input: str) -> str:
-    prompt = f"""
-    You are analyzing Jira project data for "{st.session_state.PROJECT_DISPLAY_NAME}" (Project Key: {st.session_state.PROJECT_KEY}). 
-    The following tickets are active or recently updated. Use this data to answer the query below.
-
-    TICKETS:
-    {ticket_knowledge}
-
-    QUERY:
-    {input}
-
-    Answer:
-    """
-    return llm.predict(prompt)
-
-
-tools = [
-    Tool(
-        name="ProjectTicketAnalyzer",
-        func=query_tickets,
-        description="Use to analyze Jira project tickets for status, issues, progress.",
-    )
-]
-
-memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
-
-agent = initialize_agent(
-    tools=tools,
-    llm=llm,
-    agent="chat-conversational-react-description",
-    memory=memory,
-    verbose=False,
-)
-
-# === Streamlit UI ===
-st.title("Jira Project Analyst")
-
-# Sidebar settings
-with st.sidebar:
-    st.header("Settings")
-
-    if "max_results" not in st.session_state:
-        st.session_state.max_results = 100
-    if "timeout" not in st.session_state:
-        st.session_state.timeout = 30
-    if "temperature" not in st.session_state:
-        st.session_state.temperature = 0.0
-    if "page_number" not in st.session_state:
-        st.session_state.page_number = 1
-
-    st.session_state.timeout = st.slider("Query Timeout (seconds)", 10, 60, 30)
-    st.session_state.max_results = st.number_input("Max Results", 10, 500, 100)
-    st.session_state.temperature = st.slider("AI Temperature", 0.0, 1.0, 0.0)
-
-    # Update LLM settings
-    llm.temperature = st.session_state.temperature
-
-# Project selection
-projects = get_available_projects()
-if projects:
-    project_display = st.selectbox(
-        "Select Project:",
-        list(projects.keys()),
-        help="Select a project to analyze. Format: Project Name [PROJECT-KEY]",
-    )
-    if project_display:
-        st.session_state.PROJECT_KEY = projects[project_display]["key"]
-        st.session_state.PROJECT_DISPLAY_NAME = projects[project_display]["name"]
-
-with st.expander("Project Info"):
-    st.markdown(f"**Project:** {project_display}")
-    st.markdown(f"**Project Key:** {st.session_state.PROJECT_KEY}")
-    st.markdown(f"**Project Name:** {st.session_state.PROJECT_DISPLAY_NAME}")
-    st.markdown(f"**Current JQL:** `{st.session_state.JQL_QUERY}`")
-
-query = st.text_input("Ask about the project's progress, issues, or tasks (I'll generate JQL from your query):")
-
-if query:
-    with st.spinner("Analyzing query..."):
-        extracted_jql = extract_jql_from_query(query)
-        if extracted_jql:
-            st.markdown("**Extracted JQL:**")
-            st.code(extracted_jql)
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                execute_query = st.button("Execute this JQL")
-            with col2:
-                use_default = st.button("Use default JQL")
-
-            if execute_query:
-                if validate_jql(extracted_jql):
-                    st.success("JQL validation successful!")
-                    st.session_state.JQL_QUERY = extracted_jql
-                    load_tickets.clear()
-
-                    # Display tickets table first
-                    st.markdown("**Current Tickets:**")
-                    display_tickets_table()
-
-                    with st.spinner("Analyzing tickets..."):
-                        response = agent.run(query)
-                        st.markdown("**Response:**")
-                        st.write(response)
-                        save_to_history(query, response)
-                else:
-                    st.error("Invalid JQL. Please try a different query.")
-
-            elif use_default:
-                # Display tickets table first
-                st.markdown("**Current Tickets:**")
-                display_tickets_table()
-
-                with st.spinner("Analyzing tickets with default JQL..."):
-                    response = agent.run(query)
-                    st.markdown("**Response:**")
-                    st.write(response)
-                    save_to_history(query, response)
-
-# Pagination constants
-ITEMS_PER_PAGE = 10
-
-# Show current tickets
-# Show current tickets
-if st.checkbox("Show current tickets"):
-    st.markdown("**Current Tickets Being Analyzed:**")
-
-    # Display table view
-    display_tickets_table()
-
-    # Display detailed view
-    ticket_knowledge = load_tickets()
-    display_paginated_tickets(ticket_knowledge)
-
-    # Pagination controls
-    st.session_state.page_number = st.number_input("Page", min_value=1, value=1)
-
-# Custom JQL input
-# Custom JQL input
-custom_jql = st.text_input("Or enter custom JQL directly:", key="custom_jql")
-if st.button("Use Custom JQL"):
-    if validate_jql(custom_jql):
-        st.session_state.JQL_QUERY = custom_jql
-        load_tickets.clear()
-
-        # Display tickets table
-        st.markdown("**Current Tickets:**")
-        display_tickets_table()
-
-    else:
-        st.error("Invalid custom JQL. Please check the syntax.")
-
-# Reset button
-if st.button("Reset to Default JQL"):
-    st.session_state.JQL_QUERY = f"project = {st.session_state.PROJECT_KEY} AND statusCategory != Done ORDER BY priority DESC"
-    load_tickets.clear()
-    st.rerun()
-
-# Export functionality
-if st.button("Export to CSV"):
-    df = export_tickets_to_csv()
-    if df is not None:
-        csv = df.to_csv(index=False)
-        st.download_button(
-            "Download CSV", csv, "jira_tickets.csv", "text/csv", key="download-csv"
-        )
-
-# Query History
-with st.expander("Query History"):
-    for item in reversed(st.session_state.query_history):
-        st.markdown(f"**Query ({item['timestamp']}):** {item['query']}")
-        st.markdown(f"**Response:** {item['response']}")
-        st.markdown("---")
+if __name__ == "__main__":
+    main()
