@@ -4,8 +4,7 @@ import streamlit as st
 from dotenv import load_dotenv
 from jira import JIRA
 from langchain.chat_models import AzureChatOpenAI
-from langchain.agents import initialize_agent, Tool
-from langchain.memory import ConversationBufferMemory
+from langchain.schema import SystemMessage, HumanMessage, AIMessage
 import pandas as pd
 from datetime import datetime
 from typing import Dict, List, Optional
@@ -45,11 +44,64 @@ def initialize_session_state():
         "timeout": 30,
         "temperature": 0.0,
         "page_number": 1,
+        "chat_enabled": False,
+        "current_tickets": None,  # Add this line
     }
 
     for key, default_value in default_states.items():
         if key not in st.session_state:
             st.session_state[key] = default_value
+
+
+def chat_about_tickets(tickets, chat_model):
+    """
+    Handles chat interactions about the displayed tickets.
+    """
+    if "messages" not in st.session_state:
+        st.session_state.messages = [
+            SystemMessage(
+                content="You are a helpful assistant that can discuss Jira tickets and provide insights about them."
+            )
+        ]
+
+    # Create a container for the chat interface
+    chat_container = st.container()
+
+    with chat_container:
+        # Display chat history
+        for message in st.session_state.messages[1:]:  # Skip the system message
+            if isinstance(message, HumanMessage):
+                st.chat_message("user").write(message.content)
+            elif isinstance(message, AIMessage):
+                st.chat_message("assistant").write(message.content)
+
+        # Get user input
+        if prompt := st.chat_input("Ask me about the tickets...", key="chat_input"):
+            # Add user message to chat history
+            st.session_state.messages.append(HumanMessage(content=prompt))
+            st.chat_message("user").write(prompt)
+
+            # Prepare context about tickets
+            ticket_context = "\n".join(
+                [
+                    f"Ticket {data['Key']}: {data['Summary']} (Status: {data['Status']})"
+                    for data in [extract_ticket_data(ticket) for ticket in tickets]
+                ]
+            )
+
+            # Prepare full prompt with context
+            full_prompt = f"Context about current tickets:\n{ticket_context}\n\nUser question: {prompt}"
+
+            try:
+                # Get AI response
+                response = chat_model.predict(full_prompt)
+
+                # Add AI response to chat history
+                st.session_state.messages.append(AIMessage(content=response))
+                st.chat_message("assistant").write(response)
+            except Exception as e:
+                logger.error(f"Error in chat response: {e}")
+                st.error("Failed to get response from chat agent")
 
 
 def get_jira_connection():
@@ -62,6 +114,7 @@ def get_jira_connection():
     except Exception as e:
         logger.error(f"Failed to establish JIRA connection: {e}")
         raise
+
 
 def validate_jql(jql: str) -> bool:
     """
@@ -142,9 +195,25 @@ def extract_ticket_data(issue, include_details: bool = False):
         return None
 
 
+def initialize_chat_agent():
+    """
+    Initializes the chat agent using Azure OpenAI.
+    """
+    try:
+        chat_model = AzureChatOpenAI(
+            azure_deployment=AZURE_DEPLOYMENT_NAME,
+            api_version="2023-05-15",
+            temperature=0.7,
+        )
+        return chat_model
+    except Exception as e:
+        logger.error(f"Failed to initialize chat agent: {e}")
+        return None
+
+
 def display_tickets_table(tickets):
     """
-    Displays tickets in a table format.
+    Displays tickets in a table format and provides chat option.
     """
     try:
         if not tickets:
@@ -159,9 +228,30 @@ def display_tickets_table(tickets):
         st.info(f"Total tickets found: {len(data)}")
         logger.info(f"Displayed {len(data)} tickets in table format")
 
+        # Store tickets in session state
+        st.session_state.current_tickets = tickets
+
+        # Add chat option
+        col1, col2 = st.columns([1, 5])
+        with col1:
+            if st.button(
+                "Start Chat" if not st.session_state.chat_enabled else "End Chat"
+            ):
+                st.session_state.chat_enabled = not st.session_state.chat_enabled
+                st.rerun()
+
+        if st.session_state.chat_enabled and st.session_state.current_tickets:
+            chat_model = initialize_chat_agent()
+            if chat_model:
+                st.write("You can now chat about the displayed tickets:")
+                chat_about_tickets(st.session_state.current_tickets, chat_model)
+            else:
+                st.error("Failed to initialize chat agent")
+
     except Exception as e:
         logger.error(f"Error displaying tickets table: {e}")
         st.error("Error displaying tickets table")
+
 
 def manage_query_history():
     """
@@ -200,8 +290,11 @@ def main():
             st.header("Settings")
 
             if st.button("Clear History"):
+                st.session_state.chat_enabled = False
+                st.session_state.current_tickets = None
                 initialize_session_state()
                 st.success("History cleared")
+                st.rerun()
 
             st.session_state.timeout = st.slider("Query Timeout (seconds)", 10, 60, 30)
             st.session_state.max_results = st.number_input("Max Results", 10, 500, 100)
@@ -210,11 +303,18 @@ def main():
         jql_query = st.text_area("Enter JQL Query:", height=100)
 
         if st.button("Execute JQL"):
+            st.session_state.chat_enabled = (
+                False  # Reset chat when new query is executed
+            )
             if validate_jql(jql_query):
                 st.session_state.JQL_QUERY = jql_query
                 tickets = load_jira_tickets(jql_query, st.session_state.max_results)
                 display_tickets_table(tickets)
                 save_to_history(jql_query, "Query executed successfully")
+
+        # If there are current tickets, display them and the chat interface if enabled
+        elif st.session_state.current_tickets:
+            display_tickets_table(st.session_state.current_tickets)
 
         # Query History
         with st.expander("Query History"):
