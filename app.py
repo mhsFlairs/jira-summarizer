@@ -160,6 +160,47 @@ def export_tickets_to_csv():
         return None
 
 
+# Add this after export_tickets_to_csv() function
+def display_tickets_table():
+    try:
+        jira = JIRA(server=JIRA_SERVER, basic_auth=(JIRA_USER, JIRA_API_TOKEN))
+        issues = jira.search_issues(
+            st.session_state.JQL_QUERY, maxResults=st.session_state.max_results
+        )
+
+        if not issues:
+            st.warning("No tickets found for the current query.")
+            return
+
+        # Prepare data for the table
+        data = []
+        for issue in issues:
+            data.append(
+                {
+                    "Key": issue.key,
+                    "Summary": issue.fields.summary,
+                    "Status": issue.fields.status.name,
+                    "Priority": issue.fields.priority.name,
+                    "Assignee": (
+                        str(issue.fields.assignee)
+                        if issue.fields.assignee
+                        else "Unassigned"
+                    ),
+                    "Updated": issue.fields.updated[:10],  # Show only the date part
+                }
+            )
+
+        # Convert to DataFrame and display
+        df = pd.DataFrame(data)
+        st.dataframe(df, use_container_width=True)
+
+        # Display count of tickets
+        st.info(f"Total tickets found: {len(data)}")
+
+    except Exception as e:
+        st.error(f"Error displaying tickets table: {str(e)}")
+
+
 def display_paginated_tickets(tickets):
     tickets_list = tickets.split("\n\n---\n\n")
     total_pages = len(tickets_list) // ITEMS_PER_PAGE + 1
@@ -269,7 +310,7 @@ with st.expander("Project Info"):
     st.markdown(f"**Project Name:** {st.session_state.PROJECT_DISPLAY_NAME}")
     st.markdown(f"**Current JQL:** `{st.session_state.JQL_QUERY}`")
 
-query = st.text_input("Ask about the project's progress, issues, or tasks:")
+query = st.text_input("Ask about the project's progress, issues, or tasks (I'll generate JQL from your query):")
 
 if query:
     with st.spinner("Analyzing query..."):
@@ -291,6 +332,10 @@ if query:
                     st.session_state.JQL_QUERY = extracted_jql
                     load_tickets.clear()
 
+                    # Display tickets table first
+                    st.markdown("**Current Tickets:**")
+                    display_tickets_table()
+
                     with st.spinner("Analyzing tickets..."):
                         response = agent.run(query)
                         st.markdown("**Response:**")
@@ -300,25 +345,28 @@ if query:
                     st.error("Invalid JQL. Please try a different query.")
 
             elif use_default:
+                # Display tickets table first
+                st.markdown("**Current Tickets:**")
+                display_tickets_table()
+
                 with st.spinner("Analyzing tickets with default JQL..."):
                     response = agent.run(query)
                     st.markdown("**Response:**")
                     st.write(response)
                     save_to_history(query, response)
 
-        else:
-            with st.spinner("Analyzing tickets..."):
-                response = agent.run(query)
-                st.markdown("**Response:**")
-                st.write(response)
-                save_to_history(query, response)
-
 # Pagination constants
 ITEMS_PER_PAGE = 10
 
 # Show current tickets
+# Show current tickets
 if st.checkbox("Show current tickets"):
     st.markdown("**Current Tickets Being Analyzed:**")
+
+    # Display table view
+    display_tickets_table()
+
+    # Display detailed view
     ticket_knowledge = load_tickets()
     display_paginated_tickets(ticket_knowledge)
 
@@ -326,12 +374,17 @@ if st.checkbox("Show current tickets"):
     st.session_state.page_number = st.number_input("Page", min_value=1, value=1)
 
 # Custom JQL input
+# Custom JQL input
 custom_jql = st.text_input("Or enter custom JQL directly:", key="custom_jql")
 if st.button("Use Custom JQL"):
     if validate_jql(custom_jql):
         st.session_state.JQL_QUERY = custom_jql
         load_tickets.clear()
-        st.rerun()
+
+        # Display tickets table
+        st.markdown("**Current Tickets:**")
+        display_tickets_table()
+
     else:
         st.error("Invalid custom JQL. Please check the syntax.")
 
