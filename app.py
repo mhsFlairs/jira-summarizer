@@ -9,7 +9,7 @@ from datetime import datetime
 from langchain.agents import Tool, AgentExecutor, create_openai_tools_agent
 from langchain.memory import ConversationBufferMemory
 from langchain_community.chat_models import AzureChatOpenAI
-
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # Set up logging
 logging.basicConfig(
@@ -311,6 +311,7 @@ Include relevant metrics and KPIs where available. Highlight any items requiring
 
 
 # 2. Fix the chat_about_tickets function to remove duplicate buttons
+# 2. Fix the chat_about_tickets function to use invoke instead of run
 def chat_about_tickets(tickets, chat_model):
     """
     Handles chat interactions about the displayed tickets using an agent with tools.
@@ -356,25 +357,29 @@ def chat_about_tickets(tickets, chat_model):
                     if st.session_state.agent is None:
                         raise ValueError("Agent is not initialized")
 
-                    response = st.session_state.agent.run(prompt)
+                    # Use invoke instead of run and extract the text content
+                    response = st.session_state.agent.invoke({"input": prompt})
+                    response_text = response.get(
+                        "output", "I'm sorry, I couldn't generate a response."
+                    )
 
                     # Add AI response to chat history
                     st.session_state.agent_messages.append(
-                        {"role": "assistant", "content": response}
+                        {"role": "assistant", "content": response_text}
                     )
 
                     # Display AI response
                     with st.chat_message("assistant"):
-                        st.write(response)
+                        st.write(response_text)
 
                         # If this is a stakeholder report, offer download option
                         if (
                             "stakeholder report" in prompt.lower()
-                            and len(response) > 500
+                            and len(response_text) > 500
                         ):
                             st.download_button(
                                 label="Download Report",
-                                data=response,
+                                data=response_text,
                                 file_name=f"stakeholder_report_{datetime.now().strftime('%Y%m%d_%H%M')}.md",
                                 mime="text/markdown",
                                 key="download_report_button",
