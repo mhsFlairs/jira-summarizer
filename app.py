@@ -3,7 +3,6 @@ import logging
 import streamlit as st
 from dotenv import load_dotenv
 from jira import JIRA
-from langchain.schema import SystemMessage, HumanMessage, AIMessage
 import pandas as pd
 from datetime import datetime
 from langchain.agents import Tool, AgentExecutor, create_openai_tools_agent
