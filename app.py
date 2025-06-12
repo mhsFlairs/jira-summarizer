@@ -17,7 +17,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # Load environment variables
-load_dotenv()
+load_dotenv(override=True)
 
 # === Configuration ===
 JIRA_SERVER = os.getenv("JIRA_SERVER")
@@ -28,9 +28,7 @@ AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME")
 
 # Constants
-ITEMS_PER_PAGE = 10
 MAX_HISTORY_ITEMS = 50
-MAX_QUERY_LENGTH = 500
 
 
 def initialize_session_state():
@@ -40,7 +38,7 @@ def initialize_session_state():
     default_states = {
         "query_history": [],
         "JQL_QUERY": "",
-        "max_results": 100,
+        "max_results": 1000,
         "timeout": 30,
         "temperature": 0.0,
         "page_number": 1,
@@ -53,7 +51,7 @@ def initialize_session_state():
             st.session_state[key] = default_value
 
 
-def generate_stakeholder_report(tickets, conversation_history=None):
+def generate_stakeholder_report(tickets_text, conversation_history=None):
     """
     Generates a comprehensive stakeholder report based on the provided tickets.
 
@@ -65,39 +63,8 @@ def generate_stakeholder_report(tickets, conversation_history=None):
         str: A formatted stakeholder report
     """
     try:
-        if not tickets:
+        if not tickets_text:
             return "No tickets available to generate a report."
-
-        # Extract relevant ticket data
-        ticket_data = [
-            extract_ticket_data(ticket, include_details=True) for ticket in tickets
-        ]
-        ticket_data = [data for data in ticket_data if data is not None]
-
-        # Format tickets for the prompt
-        formatted_tickets = []
-        for data in ticket_data:
-            ticket_info = [
-                f"Key: {data['Key']}",
-                f"Summary: {data['Summary']}",
-                f"Status: {data['Status']}",
-                f"Priority: {data['Priority']}",
-                f"Assignee: {data['Assignee']}",
-                f"Updated: {data['Updated']}",
-            ]
-
-            if "Description" in data and data["Description"]:
-                ticket_info.append(f"Description: {data['Description']}")
-
-            if "Comments" in data and data["Comments"]:
-                comments_text = "\n".join(
-                    [f"- {comment}" for comment in data["Comments"][:3]]
-                )
-                ticket_info.append(f"Recent Comments: {comments_text}")
-
-            formatted_tickets.append("\n".join(ticket_info))
-
-        tickets_text = "\n\n".join(formatted_tickets)
 
         # Include conversation context if available
         context = ""
@@ -115,17 +82,210 @@ def generate_stakeholder_report(tickets, conversation_history=None):
                 ]
             )
 
-        # Return the formatted tickets for the agent to process
-        return f"""Here are the JIRA tickets to analyze for your stakeholder report:
-        
-{tickets_text}
-{context}
+        # Return instructions for the agent to create the report
+        return f"""Based on the JIRA tickets that have already been provided to you, please create a comprehensive stakeholder report with the following sections:
 
-Based on the above information, please create a comprehensive stakeholder report without asking for additional information.
+                1. Executive Summary
+                - High-level overview of project progress
+                - Key achievements in this period
+                - Critical milestones reached
+
+                2. Project Status Overview
+                - Overall project health (On Track/At Risk/Delayed)
+                - Current phase of the project
+                - Percentage of completion against planned timeline
+
+                3. Key Deliverables Status
+                - Completed deliverables with brief descriptions
+                - In-progress items with expected completion dates
+                - Upcoming major deliverables
+                - Any changes to agreed scope
+
+                4. Risk and Issues
+                - Current blocking issues
+                - Potential risks identified
+                - Mitigation strategies in place
+
+                5. Timeline and Milestones
+                - Major milestones achieved
+                - Next important dates
+                - Any schedule variations
+
+                6. Resource Utilization
+                - Team capacity and allocation
+                - Any resource constraints or needs
+
+                7. Next Steps
+                - Priority items for next period
+                - Required decisions or support needed
+                - Upcoming key activities
+
+                Use clear, professional language and format the report in a way that's easily digestible for senior stakeholders.
+                Include relevant metrics and KPIs where available. Highlight any items requiring immediate attention or executive decision-making.
+
+                Conversation context:
+                {context}
+                Jira Tickets:
+                {tickets_text}
+
+                IMPORTANT: You already have access to all the ticket information. Do not ask for additional information - use what is available to create the best possible report.
 """
     except Exception as e:
         logger.error(f"Error generating stakeholder report data: {e}")
         return f"Error generating stakeholder report: {str(e)}"
+
+
+def generate_summary(tickets_text, conversation_history=None):
+    """
+    Generates a summary of the provided tickets.
+
+    Args:
+        tickets: JIRA ticket objects to summarize
+        conversation_history: Optional previous conversation for context
+
+    Returns:
+        str: A formatted summary of the tickets
+    """
+    try:
+        if not tickets_text:
+            return "No tickets available to summarize."
+
+        # Include conversation context if available
+        context = ""
+        if conversation_history:
+            # Format the last few conversation turns for context
+            context_messages = (
+                conversation_history[-3:]
+                if len(conversation_history) > 3
+                else conversation_history
+            )
+            context = "\n\nConversation context:\n" + "\n".join(
+                [
+                    f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+                    for msg in context_messages
+                ]
+            )
+
+        # Return instructions for the agent to create the summary
+        return f"""
+    
+        Prompt:
+
+        You are a technical product analyst. Based on the following Jira tickets, generate a concise product summary. Focus on the product's purpose, key features, recent changes, and target users. Eliminate redundant or low-impact information. Structure the summary in clear paragraphs or bullet points.
+
+        Conversation Context:
+        {context}
+
+        Jira Tickets:
+
+        {tickets_text}
+        
+        IMPORTANT: You already have access to all the ticket information. Do not ask for additional information - use what is available to create the best possible summary.
+        """
+    except Exception as e:
+        logger.error(f"Error generating summary data: {e}")
+        return f"Error generating summary: {str(e)}"
+
+
+def generate_product_documentation(tickets_text, conversation_history=None):
+    """
+    Generates product documentation based on the provided tickets.
+
+    Args:
+        tickets: JIRA ticket objects to analyze
+        conversation_history: Optional previous conversation for context
+
+    Returns:
+        str: A formatted product documentation
+    """
+    try:
+        if not tickets_text:
+            return "No tickets available to generate documentation."
+
+        # Include conversation context if available
+        context = ""
+        if conversation_history:
+            # Format the last few conversation turns for context
+            context_messages = (
+                conversation_history[-3:]
+                if len(conversation_history) > 3
+                else conversation_history
+            )
+            context = "\n\nConversation context:\n" + "\n".join(
+                [
+                    f"{'User' if msg['role'] == 'user' else 'Assistant'}: {msg['content']}"
+                    for msg in context_messages
+                ]
+            )
+
+        # Return instructions for the agent to create the report
+        return f"""
+                Generate comprehensive technical product documentation for a software platform. The report must be detailed, formal, and formatted using the following structure. All relevant feature IDs (e.g., JIRA ticket IDs), external references (Confluence pages, design files, repositories), and supporting links (e.g., API docs, videos, screenshots) must be included in appropriate sections.
+
+                **Document Structure:**
+
+                1. **Executive Summary**
+                    - High-level overview of the platform's purpose, scope, and key benefits.
+                    - Mention key stakeholders (e.g., product owners, admins, IT, end users).
+                2. **Product Vision & Objectives**
+                    - Clear vision statement.
+                    - List strategic objectives (e.g., support accuracy, access control, automation).
+                3. **Core Features & Capabilities**
+                    - Organize features by functional area (e.g., Chat, Admin, Knowledge Base).
+                    - For each feature:
+                        - Brief description of purpose and behavior.
+                        - Associated ticket IDs (e.g., PROJ-123, PROJ-456).
+                        - External links (e.g., design mockups, technical specs, APIs).
+                4. **User Roles & Permissions**
+                    - Define all user roles (Admin, Manager, Contributor, End User, etc.).
+                    - Detail permissions by role.
+                    - Include access scope, role mapping logic, and data filtration mechanisms.
+                5. **Business Processes & Workflows**
+                    - Describe step-by-step workflows (e.g., onboarding, knowledge ingestion, chat flow).
+                    - Indicate where automation is implemented.
+                    - Link to relevant process diagrams or Confluence pages.
+                6. **Technical Architecture Overview**
+                    - Outline major system components (Frontend, Backend, Database, Integrations).
+                    - Describe authentication and data flow.
+                    - Reference diagrams or architecture documents (e.g., system blueprint links).
+                7. **API Documentation**
+                    - List key endpoints, grouped by functional domain.
+                    - Include methods (GET, POST, etc.), required tokens, and access logic.
+                    - Link to Swagger/OpenAPI docs and authentication references.
+                8. **UI/UX Guidelines**
+                    - Summarize design principles used.
+                    - Mention interaction patterns, accessibility standards, and error handling.
+                    - Reference Figma links or design system documentation.
+                9. **Release Notes & Change History**
+                    - List major released features with ticket IDs.
+                    - Identify canceled items and UAT-specific features.
+                    - Include version info and dates if available.
+                10. **Troubleshooting & Known Issues**
+                    - List ongoing blockers and known issues with associated ticket IDs.
+                    - Link to relevant bug reports, logs, or tracking boards (e.g., JIRA filters).
+                11. **References & Supporting Links**
+                    - Consolidate all external documentation:
+                        - Confluence articles
+                        - Figma files
+                        - API portals
+                        - Repositories (e.g., Bitbucket, GitHub)
+                        - Videos/images tied to feature delivery or UAT
+
+                **Requirements:**
+
+                - The tone should be formal and objective.
+                - Use bullet points and subheadings for clarity.
+                - Include exact ticket references and documentation links wherever possible.
+                - Structure the content for internal distribution to technical stakeholders, project managers, and support leads.
+
+                Conversation context:
+                {context}
+                Jira Tickets:
+                {tickets_text}
+                """
+    except Exception as e:
+        logger.error(f"Error generating product documentation data: {e}")
+        return f"Error generating product documentation: {str(e)}"
 
 
 def get_jira_connection():
@@ -134,6 +294,10 @@ def get_jira_connection():
     Returns: JIRA connection object
     """
     try:
+        logger.info("Connecting to JIRA...")
+        logger.info(f"Using JIRA server: {JIRA_SERVER}")
+        logger.info(f"Using JIRA user: {JIRA_USER}")
+        logger.info(f"Using JIRA API token: {JIRA_API_TOKEN}")
         return JIRA(server=JIRA_SERVER, basic_auth=(JIRA_USER, JIRA_API_TOKEN))
     except Exception as e:
         logger.error(f"Failed to establish JIRA connection: {e}")
@@ -150,8 +314,8 @@ def validate_jql(jql: str) -> bool:
         return False
 
     try:
-        logger.info(f"Validating JQL: {jql}")
         jira = get_jira_connection()
+        logger.info(f"Validating JQL: {jql}")
         jira.search_issues(jql, maxResults=1)
         return True
     except Exception as e:
@@ -160,21 +324,124 @@ def validate_jql(jql: str) -> bool:
         return False
 
 
-def load_jira_tickets(jql_query: str, max_results: int, expanded: bool = False):
+def load_jira_tickets(
+    jql_query: str,
+    max_results: int = None,
+    expanded: bool = False,
+    load_all: bool = False,
+):
     """
-    Common function to load JIRA tickets.
+    Common function to load JIRA tickets with pagination support.
+
+    Args:
+        jql_query: JQL query string
+        max_results: Maximum number of results to return (None for unlimited when load_all=True)
+        expanded: Whether to expand fields
+        load_all: If True, loads all tickets using pagination
     """
     try:
         logger.info(f"Fetching tickets with JQL: {jql_query}")
         jira = get_jira_connection()
 
-        expand_params = ["renderedFields"] if expanded else None
-        issues = jira.search_issues(
-            jql_query, maxResults=max_results, expand=expand_params
-        )
+        if not load_all:
+            # Original behavior - load up to max_results
+            expand_params = ["renderedFields"] if expanded else None
+            issues = jira.search_issues(
+                jql_query, maxResults=max_results, expand=expand_params
+            )
+            logger.info(f"Successfully fetched {len(issues)} tickets")
+            return issues
 
-        logger.info(f"Successfully fetched {len(issues)} tickets")
-        return issues
+        # Pagination logic for loading all tickets
+        all_issues = []
+        start_at = 0
+        page_size = 100  # Jira's recommended page size
+        total_issues = None
+
+        # Show progress bar in Streamlit
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+
+        while True:
+            try:
+                expand_params = ["renderedFields"] if expanded else None
+
+                # Fetch a page of results
+                page_issues = jira.search_issues(
+                    jql_query,
+                    startAt=start_at,
+                    maxResults=page_size,
+                    expand=expand_params,
+                )
+
+                # If this is the first request, get the total count
+                if total_issues is None:
+                    # Get total count by searching with maxResults=0
+                    count_result = jira.search_issues(jql_query, maxResults=0)
+                    total_issues = count_result.total
+                    logger.info(f"Total tickets to fetch: {total_issues}")
+
+                    if total_issues == 0:
+                        logger.info("No tickets found")
+                        break
+
+                    # Apply max_results limit if specified
+                    if max_results and max_results < total_issues:
+                        total_issues = max_results
+                        logger.info(
+                            f"Limiting to {max_results} tickets as per max_results setting"
+                        )
+
+                # Add the issues from this page
+                current_page_count = len(page_issues)
+                all_issues.extend(page_issues)
+
+                # Update progress
+                progress = min(len(all_issues) / total_issues, 1.0)
+                progress_bar.progress(progress)
+                status_text.text(
+                    f"Loaded {len(all_issues)} of {total_issues} tickets..."
+                )
+
+                logger.info(
+                    f"Fetched page starting at {start_at}, got {current_page_count} tickets. Total so far: {len(all_issues)}"
+                )
+
+                # Check if we've reached the end or our limit
+                if (
+                    current_page_count < page_size
+                    or len(all_issues) >= total_issues
+                    or (max_results and len(all_issues) >= max_results)
+                ):
+                    break
+
+                start_at += page_size
+
+            except Exception as page_error:
+                logger.error(
+                    f"Error fetching page starting at {start_at}: {page_error}"
+                )
+                # If we have some results, return them; otherwise re-raise
+                if all_issues:
+                    logger.warning(
+                        f"Partial results returned: {len(all_issues)} tickets"
+                    )
+                    break
+                else:
+                    raise page_error
+
+        # Clean up progress indicators
+        progress_bar.empty()
+        status_text.empty()
+
+        # Apply max_results limit if specified
+        if max_results and len(all_issues) > max_results:
+            all_issues = all_issues[:max_results]
+            logger.info(f"Trimmed results to {max_results} tickets")
+
+        logger.info(f"Successfully fetched {len(all_issues)} tickets using pagination")
+        return all_issues
+
     except Exception as e:
         logger.error(f"Error loading tickets: {e}")
         raise
@@ -238,77 +505,111 @@ def initialize_chat_agent():
 # 1. Fix the system_message in create_jira_agent function (convert string to SystemMessage)
 
 
+def escape_braces(s):
+    return s.replace("{", "{{").replace("}", "}}")
+
+
+def create_tickets_text(tickets):
+    # Extract and format ticket data at agent creation time
+    try:
+        logger.info("Creating tickets text for system prompt...")
+        ticket_data = [
+            extract_ticket_data(ticket, include_details=True) for ticket in tickets
+        ]
+        ticket_data = [data for data in ticket_data if data is not None]
+
+        # Format tickets for the system prompt
+        formatted_tickets = []
+        for data in ticket_data:
+            ticket_info = [
+                f"Key: {data['Key']}",
+                f"Summary: {data['Summary']}",
+                f"Status: {data['Status']}",
+                f"Priority: {data['Priority']}",
+                f"Assignee: {data['Assignee']}",
+                f"Updated: {data['Updated']}",
+            ]
+
+            if "Description" in data and data["Description"]:
+                ticket_info.append(f"Description: {data['Description']}")
+
+            if "Comments" in data and data["Comments"]:
+                comments_text = "\n".join(
+                    [f"- {comment}" for comment in data["Comments"][:3]]
+                )
+                ticket_info.append(f"Recent Comments: {comments_text}")
+
+            formatted_tickets.append("\n".join(ticket_info))
+
+        tickets_text = "\n\n".join(formatted_tickets)
+
+        # stringify the tickets text for the system prompt
+        tickets_text = escape_braces(tickets_text)
+        return tickets_text
+    except Exception as e:
+        logger.error(f"Error creating tickets text: {e}")
+        raise e
+
+
 # 2. Update the create_jira_agent function to pass conversation history to the tool
 def create_jira_agent(chat_model, tickets):
     """
     Creates an agent with tools for analyzing JIRA tickets.
     """
     try:
-        # Define tools that pass conversation history
+
+        tickets_text = create_tickets_text(tickets)
+
+        logger.info("Creating JIRA agent with tools...")
+        # Define tools
         tools = [
             Tool(
                 name="generate_stakeholder_report",
                 func=lambda _: generate_stakeholder_report(
-                    tickets, st.session_state.get("agent_messages", [])
+                    tickets_text, st.session_state.get("agent_messages", [])
                 ),
-                description="Generates a comprehensive stakeholder report based on the current JIRA tickets. Use this when asked to create, generate, or prepare a report for stakeholders or management.",
-            )
+                description="""Only use this for stakeholders or client not anyone who is internal. Generates a comprehensive stakeholder report based on the current JIRA tickets. Use this when asked to create, generate, or prepare a report for stakeholders or management.""",
+            ),
+            Tool(
+                name="summarize_tickets",
+                func=lambda _: generate_summary(
+                    tickets_text, st.session_state.get("agent_messages", [])
+                ),
+                description="""Summarizes the current JIRA tickets. Use this when asked to provide a summary of the tickets or project status""",
+            ),
+            Tool(
+                name="generate_product_documentation",
+                func=lambda _: generate_product_documentation(
+                    tickets_text, st.session_state.get("agent_messages", [])
+                ),
+                description="""Generates product documentation based on the current JIRA tickets. Use this when asked to create or generate product documentation.""",
+            ),
         ]
 
-        # Define agent prompt using ChatPromptTemplate
+        logger.info(f"Defined {len(tools)} tools for the agent")
+
+        # Define agent prompt with ticket data included in system message
+        system_message = f"""You are a helpful JIRA analysis assistant that can discuss Jira tickets and provide insights about them.
+        You will be given jira tickets, You can answer questions about these tickets, provide analysis, summaries, and generate stakeholder reports. When users ask about tickets, refer to the data above. When asked to generate a stakeholder report, use the generate_stakeholder_report tool."""
+
+        tickets_context_message = f"""You have access to the following JIRA tickets:
+        {tickets_text}
+        Use this information to answer questions, provide analysis, and generate reports as needed.
+        """
+
+        logger.info("Creating chat prompt template...")
+
         prompt = ChatPromptTemplate.from_messages(
             [
-                (
-                    "system",
-                    """You are a helpful JIRA analysis assistant that can discuss Jira tickets and provide insights about them.
-When asked to generate a stakeholder report, use the generate_stakeholder_report tool to get ticket data, then analyze it and create a professional report with the following sections:
-
-1. Executive Summary
-- High-level overview of project progress
-- Key achievements in this period
-- Critical milestones reached
-
-2. Project Status Overview
-- Overall project health (On Track/At Risk/Delayed)
-- Current phase of the project
-- Percentage of completion against planned timeline
-
-3. Key Deliverables Status
-- Completed deliverables with brief descriptions
-- In-progress items with expected completion dates
-- Upcoming major deliverables
-- Any changes to agreed scope
-
-4. Risk and Issues
-- Current blocking issues
-- Potential risks identified
-- Mitigation strategies in place
-
-5. Timeline and Milestones
-- Major milestones achieved
-- Next important dates
-- Any schedule variations
-
-6. Resource Utilization
-- Team capacity and allocation
-- Any resource constraints or needs
-
-7. Next Steps
-- Priority items for next period
-- Required decisions or support needed
-- Upcoming key activities
-
-Use clear, professional language and format the report in a way that's easily digestible for senior stakeholders.
-Include relevant metrics and KPIs where available. Highlight any items requiring immediate attention or executive decision-making.
-
-IMPORTANT: The user has already provided all necessary information about the tickets. Do not ask for additional information or clarification - use what is available to create the best possible report.
-""",
-                ),
+                ("system", system_message),
+                ("system", tickets_context_message),
                 MessagesPlaceholder(variable_name="chat_history"),
                 ("human", "{input}"),
                 MessagesPlaceholder(variable_name="agent_scratchpad"),
             ]
         )
+
+        logger.info("Creating agent with tools...")
 
         # Create agent
         agent = create_openai_tools_agent(chat_model, tools, prompt)
@@ -326,6 +627,9 @@ IMPORTANT: The user has already provided all necessary information about the tic
                 else:
                     memory.chat_memory.add_ai_message(message["content"])
 
+        logger.info("Agent and memory created successfully")
+
+        logger.info("Creating agent executor...")
         # Create agent executor
         agent_executor = AgentExecutor.from_agent_and_tools(
             agent=agent,
@@ -547,10 +851,7 @@ def display_tickets_table(tickets):
             chat_model = initialize_chat_agent()
             if chat_model:
                 st.write(
-                    "You can now chat about the tickets or ask for a stakeholder report:"
-                )
-                st.info(
-                    "Try asking: 'Please prepare a stakeholder report' or 'Generate a report for management'"
+                    "You can now chat about the tickets."
                 )
                 chat_about_tickets(st.session_state.current_tickets, chat_model)
             else:
@@ -604,8 +905,12 @@ def main():
                 st.success("History cleared")
                 st.rerun()
 
-            st.session_state.timeout = st.slider("Query Timeout (seconds)", 10, 60, 30)
-            st.session_state.max_results = st.number_input("Max Results", 10, 500, 100)
+            st.session_state.timeout = st.slider(
+                "Query Timeout (seconds)", 10, 60, st.session_state.timeout
+            )
+            st.session_state.max_results = st.number_input(
+                "Max Results", 10, 10000, st.session_state.max_results
+            )
 
         # JQL input
         jql_query = st.text_area("Enter JQL Query:", height=100)
@@ -616,7 +921,9 @@ def main():
             )
             if validate_jql(jql_query):
                 st.session_state.JQL_QUERY = jql_query
-                tickets = load_jira_tickets(jql_query, st.session_state.max_results)
+                tickets = load_jira_tickets(
+                    jql_query, st.session_state.max_results, load_all=True
+                )
                 display_tickets_table(tickets)
                 save_to_history(jql_query, "Query executed successfully")
 
