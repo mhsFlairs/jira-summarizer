@@ -23,9 +23,9 @@ load_dotenv(override=True)
 JIRA_SERVER = os.getenv("JIRA_SERVER")
 JIRA_USER = os.getenv("JIRA_USER")
 JIRA_API_TOKEN = os.getenv("JIRA_API_TOKEN")
-AZURE_OPENAI_API_KEY = os.getenv("AZURE_OPENAI_API_KEY")
 AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT")
 AZURE_DEPLOYMENT_NAME = os.getenv("AZURE_DEPLOYMENT_NAME")
+AZURE_DEPLOYMENT_TINY_NAME = os.getenv("AZURE_DEPLOYMENT_TINY_NAME")
 
 # Constants
 MAX_HISTORY_ITEMS = 50
@@ -493,12 +493,28 @@ def initialize_chat_agent():
     try:
         chat_model = AzureChatOpenAI(
             azure_deployment=AZURE_DEPLOYMENT_NAME,
-            api_version="2023-05-15",
+            api_version="2024-12-01-preview",
             temperature=0.7,
         )
         return chat_model
     except Exception as e:
         logger.error(f"Failed to initialize chat agent: {e}")
+        return None
+
+
+def initialize_tiny_chat_agent():
+    """
+    Initializes a smaller chat agent for welcome messages and tool descriptions.
+    """
+    try:
+        tiny_chat_model = AzureChatOpenAI(
+            azure_deployment=AZURE_DEPLOYMENT_TINY_NAME,
+            api_version="2024-12-01-preview",
+            temperature=0.2,
+        )
+        return tiny_chat_model
+    except Exception as e:
+        logger.error(f"Failed to initialize tiny chat agent: {e}")
         return None
 
 
@@ -630,6 +646,7 @@ def create_jira_agent(chat_model, tickets):
         logger.info("Agent and memory created successfully")
 
         logger.info("Creating agent executor...")
+
         # Create agent executor
         agent_executor = AgentExecutor.from_agent_and_tools(
             agent=agent,
@@ -646,9 +663,95 @@ def create_jira_agent(chat_model, tickets):
         return None
 
 
+def generate_tool_description(tool_name, tool_description, chat_model):
+    """
+    Uses AI to generate a more user-friendly description of a tool.
+    """
+    prompt = f"""
+    Rewrite the following tool description to be more user-friendly and engaging.
+    Make it concise but clear, and include an example of when to use it.
+    
+    Tool Name: {tool_name}
+    Technical Description: {tool_description}
+    
+    Format the response in a single paragraph, starting with an emoji that represents the tool's function.
+    """
+
+    try:
+        response = chat_model.invoke(prompt)
+        return response.content
+    except Exception as e:
+        logger.error(f"Error generating tool description: {e}")
+        return f"📌 {tool_description}"  # Fallback to original description
+
+
+def generate_welcome_message(tools, chat_model):
+    """
+    Generates a welcome message with AI-enhanced tool descriptions.
+    """
+    try:
+        # Generate enhanced descriptions for each tool
+        tool_descriptions = []
+        for tool in tools:
+            enhanced_description = generate_tool_description(
+                tool.name, tool.description, chat_model
+            )
+            tool_descriptions.append(f"- **{tool.name}**: {enhanced_description}")
+
+        tools_section = "\n\n".join(tool_descriptions)
+
+        welcome_message = f"""
+# Welcome to Your JIRA Analysis Assistant! 🚀
+
+I'm your AI-powered assistant specialized in analyzing JIRA tickets and providing valuable insights. Let me show you what I can do for you:
+
+## Available Tools 🛠️
+{tools_section}
+
+## Example Queries 💬
+Here are some ways you can interact with me:
+- "Give me a quick summary of all current tickets"
+- "Create a stakeholder report focusing on major achievements"
+- "Generate documentation for the new features"
+- "What are the main blockers in our current sprint?"
+
+## Pro Tips 💡
+- Be specific in your requests for more accurate responses
+- Feel free to ask follow-up questions or request modifications
+- You can download stakeholder reports as markdown files
+- Use natural language - no need for special commands
+
+Ready to begin? Just type your question or request below! 👇
+"""
+        return welcome_message
+
+    except Exception as e:
+        logger.error(f"Error generating welcome message: {e}")
+        return generate_fallback_welcome_message(tools)
+
+
+def generate_fallback_welcome_message(tools):
+    """
+    Generates a basic welcome message if AI enhancement fails.
+    """
+    tool_descriptions = "\n".join(
+        f"- **{tool.name}**: {tool.description}" for tool in tools
+    )
+
+    return f"""
+# Welcome to Your JIRA Analysis Assistant! 🚀
+
+I'm here to help you analyze JIRA tickets. Here are my available tools:
+
+{tool_descriptions}
+
+Feel free to ask any questions about your tickets!
+"""
+
+
 # 2. Fix the chat_about_tickets function to remove duplicate buttons
 # 2. Fix the chat_about_tickets function to use invoke instead of run
-def chat_about_tickets(tickets, chat_model):
+def chat_about_tickets(tickets, chat_model, tiny_chat_model):
     """
     Handles chat interactions about the displayed tickets using an agent with tools.
     """
@@ -659,6 +762,12 @@ def chat_about_tickets(tickets, chat_model):
             st.error("Failed to create agent. Please try again.")
             return
         st.session_state.agent = agent
+
+    # Generate and display welcome message when agent is first created
+    if "welcome_displayed" not in st.session_state:
+        welcome_message = generate_welcome_message(agent.tools, tiny_chat_model)
+        st.markdown(welcome_message)
+        st.session_state.welcome_displayed = True
 
     if "agent_messages" not in st.session_state:
         st.session_state.agent_messages = []
@@ -849,11 +958,10 @@ def display_tickets_table(tickets):
 
         if st.session_state.chat_enabled and st.session_state.current_tickets:
             chat_model = initialize_chat_agent()
+            tiny_chat_model = initialize_tiny_chat_agent()
             if chat_model:
-                st.write(
-                    "You can now chat about the tickets."
-                )
-                chat_about_tickets(st.session_state.current_tickets, chat_model)
+                st.write("You can now chat about the tickets.")
+                chat_about_tickets(st.session_state.current_tickets, chat_model,tiny_chat_model)
             else:
                 st.error("Failed to initialize chat agent")
 
