@@ -559,6 +559,9 @@ def create_tickets_text(tickets):
 
         tickets_text = "\n\n".join(formatted_tickets)
 
+        # Store the raw tickets text in session state for copying
+        st.session_state.raw_tickets_text = tickets_text
+
         # stringify the tickets text for the system prompt
         tickets_text = escape_braces(tickets_text)
         return tickets_text
@@ -941,12 +944,12 @@ def display_tickets_table(tickets):
         # Store tickets in session state
         st.session_state.current_tickets = tickets
 
-        # Add chat option
-        col1, col2 = st.columns([1, 5])
+        # Add buttons for chat and copy tickets
+        col1, col2, col3 = st.columns([1, 1, 4])
         with col1:
             if st.button(
                 "Start Chat" if not st.session_state.chat_enabled else "End Chat",
-                key="toggle_chat_button",  # Add unique key to fix the button ID error
+                key="toggle_chat_button",
             ):
                 st.session_state.chat_enabled = not st.session_state.chat_enabled
                 # Reset agent when toggling chat
@@ -956,12 +959,57 @@ def display_tickets_table(tickets):
                     st.session_state.agent_messages = []
                 st.rerun()
 
+        with col2:
+            # Create tickets text and add copy button
+            if tickets:
+                # Generate the formatted tickets text
+                ticket_data = [
+                    extract_ticket_data(ticket, include_details=True)
+                    for ticket in tickets
+                ]
+                ticket_data = [data for data in ticket_data if data is not None]
+
+                formatted_tickets = []
+                for data in ticket_data:
+                    ticket_info = [
+                        f"Key: {data['Key']}",
+                        f"Summary: {data['Summary']}",
+                        f"Status: {data['Status']}",
+                        f"Priority: {data['Priority']}",
+                        f"Assignee: {data['Assignee']}",
+                        f"Updated: {data['Updated']}",
+                    ]
+
+                    if "Description" in data and data["Description"]:
+                        ticket_info.append(f"Description: {data['Description']}")
+
+                    if "Comments" in data and data["Comments"]:
+                        comments_text = "\n".join(
+                            [f"- {comment}" for comment in data["Comments"][:3]]
+                        )
+                        ticket_info.append(f"Recent Comments: {comments_text}")
+
+                    formatted_tickets.append("\n".join(ticket_info))
+
+                tickets_text = "\n\n".join(formatted_tickets)
+
+                # Download button for tickets text
+                st.download_button(
+                    label="Copy Tickets",
+                    data=tickets_text,
+                    file_name=f"tickets_export_{datetime.now().strftime('%Y%m%d_%H%M')}.txt",
+                    mime="text/plain",
+                    key="copy_tickets_button",
+                )
+
         if st.session_state.chat_enabled and st.session_state.current_tickets:
             chat_model = initialize_chat_agent()
             tiny_chat_model = initialize_tiny_chat_agent()
             if chat_model:
                 st.write("You can now chat about the tickets.")
-                chat_about_tickets(st.session_state.current_tickets, chat_model,tiny_chat_model)
+                chat_about_tickets(
+                    st.session_state.current_tickets, chat_model, tiny_chat_model
+                )
             else:
                 st.error("Failed to initialize chat agent")
 
