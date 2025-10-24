@@ -9,6 +9,9 @@ from langchain.agents import Tool, AgentExecutor, create_openai_tools_agent
 from langchain.memory import ConversationBufferMemory
 from langchain_community.chat_models import AzureChatOpenAI
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
+import requests
+import base64
+import json
 
 # Set up logging
 logging.basicConfig(
@@ -304,9 +307,101 @@ def get_jira_connection():
         raise
 
 
+def search_jira_issues_v3(jql_query, start_at=0, max_results=50, fields=None, expand=None):
+    """
+    Search JIRA issues using the new v3 API endpoint.
+    
+    Args:
+        jql_query: JQL query string
+        start_at: Starting index for pagination
+        max_results: Maximum number of results per page
+        fields: List of fields to return
+        expand: List of fields to expand
+    
+    Returns:
+        Dict containing search results
+    """
+    try:
+        # Prepare authentication
+        auth_string = f"{JIRA_USER}:{JIRA_API_TOKEN}"
+        auth_bytes = auth_string.encode('ascii')
+        auth_b64 = base64.b64encode(auth_bytes).decode('ascii')
+        
+        headers = {
+            'Authorization': f'Basic {auth_b64}',
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+        }
+        
+        # Use the new v3 enhanced search endpoint
+        url = f"{JIRA_SERVER}/rest/api/3/search/jql"
+        
+        # Define default fields needed by extract_ticket_data
+        default_fields = [
+            'summary', 'status', 'priority', 'assignee', 'updated', 
+            'description', 'comment', 'resolution', 'created', 'issuetype',
+            'project', 'creator', 'reporter'
+        ]
+        
+        # Use provided fields or default fields
+        request_fields = fields if fields else default_fields
+        
+        # Prepare query parameters for GET request
+        params = {
+            'jql': jql_query,
+            'maxResults': max_results,
+            'fields': ','.join(request_fields) if isinstance(request_fields, list) else request_fields,
+            'startAt': start_at  # Always include startAt, even if it's 0
+        }
+            
+        if expand:
+            params['expand'] = ','.join(expand) if isinstance(expand, list) else expand
+        
+        logger.info(f"Making request to: {url}")
+        logger.info(f"With params: {params}")
+        
+        # Make GET request
+        response = requests.get(url, headers=headers, params=params, timeout=30)
+        
+        if response.status_code == 200:
+            result = response.json()
+            logger.info(f"API returned {len(result.get('issues', []))} issues")
+            logger.info(f"Full response keys: {list(result.keys())}")
+            logger.info(f"Response structure: total={result.get('total', 'not found')}, startAt={result.get('startAt', 'not found')}, maxResults={result.get('maxResults', 'not found')}, isLast={result.get('isLast', 'not found')}")
+            return result
+        else:
+            logger.error(f"API request failed with status {response.status_code}: {response.text}")
+            raise Exception(f"API request failed with status {response.status_code}: {response.text}")
+                
+    except Exception as e:
+        logger.error(f"Error making API request: {e}")
+        raise
+
+
+class JiraIssueWrapper:
+    """
+    Wrapper class to make the API response compatible with the existing code
+    that expects JIRA issue objects.
+    """
+    def __init__(self, issue_data):
+        self.raw = issue_data
+        self.key = issue_data.get('key', '')
+        self.id = issue_data.get('id', '')
+        self.fields = issue_data.get('fields', {})
+        
+    def __getattr__(self, name):
+        # Delegate attribute access to the raw data
+        if name in self.raw:
+            return self.raw[name]
+        elif name in self.fields:
+            return self.fields[name]
+        else:
+            raise AttributeError(f"'{self.__class__.__name__}' object has no attribute '{name}'")
+
+
 def validate_jql(jql: str) -> bool:
     """
-    Validates JQL syntax.
+    Validates JQL syntax using the new v3 API.
     """
     if not jql or not jql.strip():
         st.warning("Please enter a valid JQL query")
@@ -314,9 +409,9 @@ def validate_jql(jql: str) -> bool:
         return False
 
     try:
-        jira = get_jira_connection()
         logger.info(f"Validating JQL: {jql}")
-        jira.search_issues(jql, maxResults=1)
+        # Use the new API to validate with just 1 result
+        result = search_jira_issues_v3(jql, max_results=1)
         return True
     except Exception as e:
         logger.error(f"Invalid JQL: {e}")
@@ -331,7 +426,7 @@ def load_jira_tickets(
     load_all: bool = False,
 ):
     """
-    Common function to load JIRA tickets with pagination support.
+    Common function to load JIRA tickets with pagination support using the new v3 API.
 
     Args:
         jql_query: JQL query string
@@ -341,15 +436,24 @@ def load_jira_tickets(
     """
     try:
         logger.info(f"Fetching tickets with JQL: {jql_query}")
-        jira = get_jira_connection()
 
         if not load_all:
             # Original behavior - load up to max_results
             expand_params = ["renderedFields"] if expanded else None
-            issues = jira.search_issues(
-                jql_query, maxResults=max_results, expand=expand_params
+            result = search_jira_issues_v3(
+                jql_query, max_results=max_results or 50, expand=expand_params
             )
+            
+            # write to json
+            
+            with open('jira_issues.json', 'w') as f:
+                json.dump(result, f, indent=4)
+            
+            # Convert to wrapper objects for compatibility
+            issues = [JiraIssueWrapper(issue) for issue in result.get('issues', [])]
             logger.info(f"Successfully fetched {len(issues)} tickets")
+            # write to json
+            
             return issues
 
         # Pagination logic for loading all tickets
@@ -357,6 +461,7 @@ def load_jira_tickets(
         start_at = 0
         page_size = 100  # Jira's recommended page size
         total_issues = None
+        next_page_token = None
 
         # Show progress bar in Streamlit
         progress_bar = st.progress(0)
@@ -366,56 +471,100 @@ def load_jira_tickets(
             try:
                 expand_params = ["renderedFields"] if expanded else None
 
-                # Fetch a page of results
-                page_issues = jira.search_issues(
+                # Fetch a page of results - use nextPageToken if available, otherwise startAt
+                if next_page_token and start_at > 0:
+                    # TODO: Implement nextPageToken support in search_jira_issues_v3
+                    # For now, continue with startAt
+                    logger.info(f"Using startAt={start_at} (nextPageToken available but not implemented yet)")
+                
+                result = search_jira_issues_v3(
                     jql_query,
-                    startAt=start_at,
-                    maxResults=page_size,
+                    start_at=start_at,
+                    max_results=page_size,
                     expand=expand_params,
                 )
 
-                # If this is the first request, get the total count
+                page_issues = result.get('issues', [])
+                current_page_count = len(page_issues)
+                
+                # If this is the first request, handle total count
                 if total_issues is None:
-                    # Get total count by searching with maxResults=0
-                    count_result = jira.search_issues(jql_query, maxResults=0)
-                    total_issues = count_result.total
-                    logger.info(f"Total tickets to fetch: {total_issues}")
-
-                    if total_issues == 0:
-                        logger.info("No tickets found")
+                    # The new v3 API doesn't provide total count, we'll paginate until isLast=True
+                    if current_page_count > 0:
+                        total_issues = 999999  # Unknown total, will paginate until complete
+                        logger.info(f"No total count available from API, will paginate until isLast=True")
+                    else:
+                        total_issues = 0
+                        logger.info("No tickets found in first page")
                         break
 
-                    # Apply max_results limit if specified
-                    if max_results and max_results < total_issues:
-                        total_issues = max_results
-                        logger.info(
-                            f"Limiting to {max_results} tickets as per max_results setting"
-                        )
-
-                # Add the issues from this page
-                current_page_count = len(page_issues)
-                all_issues.extend(page_issues)
+                # Check if we have any issues in this page
+                if current_page_count == 0:
+                    logger.info("No issues in this page, stopping")
+                    break
+                wrapped_issues = [JiraIssueWrapper(issue) for issue in page_issues]
+                
+                # Debug: Log the keys of issues we're getting to detect duplicates
+                if page_issues:
+                    page_keys = [issue.get('key', 'no-key') for issue in page_issues]
+                    logger.info(f"Page {len(all_issues) // page_size + 1} issue keys: {page_keys[:5]}{'...' if len(page_keys) > 5 else ''}")
+                
+                # Check for duplicates before adding
+                existing_keys = {issue.key for issue in all_issues}
+                new_issues = [issue for issue in wrapped_issues if issue.key not in existing_keys]
+                duplicate_count = len(wrapped_issues) - len(new_issues)
+                
+                if duplicate_count > 0:
+                    logger.warning(f"Found {duplicate_count} duplicate issues in this page, skipping them")
+                
+                all_issues.extend(new_issues)
+                logger.info(f"Added {len(new_issues)} new issues, total unique issues so far: {len(all_issues)}")
 
                 # Update progress
-                progress = min(len(all_issues) / total_issues, 1.0)
-                progress_bar.progress(progress)
-                status_text.text(
-                    f"Loaded {len(all_issues)} of {total_issues} tickets..."
-                )
+                if total_issues == 999999:  # Unknown total case
+                    # Show indeterminate progress based on pages fetched
+                    progress_value = min((len(all_issues) % 200) / 200.0, 0.9)  # Cycling progress, max 90%
+                    status_text.text(f"Loaded {len(all_issues)} tickets (fetching until complete)...")
+                    progress_bar.progress(progress_value)
+                elif max_results and max_results < total_issues:
+                    progress = min(len(all_issues) / max_results, 1.0)
+                    status_text.text(f"Loaded {len(all_issues)} of {max_results} tickets (limited)...")
+                    progress_bar.progress(progress)
+                else:
+                    progress = min(len(all_issues) / total_issues, 1.0) if total_issues > 0 else 0
+                    status_text.text(f"Loaded {len(all_issues)} of {total_issues} tickets...")
+                    progress_bar.progress(progress)
 
-                logger.info(
-                    f"Fetched page starting at {start_at}, got {current_page_count} tickets. Total so far: {len(all_issues)}"
-                )
+                logger.info(f"Fetched page starting at {start_at}, got {current_page_count} tickets. Total so far: {len(all_issues)}")
 
                 # Check if we've reached the end or our limit
-                if (
-                    current_page_count < page_size
-                    or len(all_issues) >= total_issues
-                    or (max_results and len(all_issues) >= max_results)
-                ):
+                should_break = False
+                
+                if max_results and len(all_issues) >= max_results:
+                    logger.info(f"Reached max_results limit of {max_results}")
+                    should_break = True
+                elif result.get('isLast', True):  # Default to True if not present
+                    logger.info("API indicates this is the last page (isLast=True)")
+                    should_break = True
+                elif duplicate_count == current_page_count and current_page_count > 0:
+                    logger.warning("All issues in this page were duplicates - API pagination may be broken, stopping")
+                    should_break = True
+                elif len(new_issues) == 0 and current_page_count > 0:
+                    logger.warning("No new issues added from this page, stopping to prevent infinite loop")
+                    should_break = True
+                
+                if should_break:
+                    # Update the final total if we had estimated it
+                    if total_issues == 999999:
+                        total_issues = len(all_issues)
+                        logger.info(f"Final total tickets: {total_issues}")
                     break
 
-                start_at += page_size
+                # Update pagination parameters for next iteration
+                # The new API uses nextPageToken, but we'll continue with startAt for now
+                start_at += current_page_count
+                next_page_token = result.get('nextPageToken')
+                logger.info(f"Next page will start at index {start_at}, nextPageToken: {next_page_token}")
 
             except Exception as page_error:
                 logger.error(
@@ -440,6 +589,10 @@ def load_jira_tickets(
             logger.info(f"Trimmed results to {max_results} tickets")
 
         logger.info(f"Successfully fetched {len(all_issues)} tickets using pagination")
+        
+        with open('jira_issues.json', 'w') as f:
+            json.dump(result, f, indent=4)
+        
         return all_issues
 
     except Exception as e:
@@ -450,40 +603,125 @@ def load_jira_tickets(
 def extract_ticket_data(issue, include_details: bool = False):
     """
     Extracts relevant data from a JIRA issue.
+    Works with both old JIRA library objects and new API response objects.
     """
     try:
+        # Handle both wrapper objects and direct API responses
+        if isinstance(issue, JiraIssueWrapper):
+            fields = issue.fields
+            key = issue.key
+        else:
+            # Fallback for old JIRA library objects
+            fields = issue.fields
+            key = issue.key
+
+        # Safe field access with fallbacks
+        def safe_get(obj, attr, default=None):
+            try:
+                value = getattr(obj, attr, default)
+                if isinstance(value, dict):
+                    return value.get('name', str(value)) if value else default
+                return value if value is not None else default
+            except:
+                return default
+
+        def safe_dict_get(d, key, subkey=None, default=None):
+            try:
+                if isinstance(d, dict):
+                    value = d.get(key, default)
+                    if subkey and isinstance(value, dict):
+                        return value.get(subkey, default)
+                    return value
+                else:
+                    return getattr(d, key, default) if hasattr(d, key) else default
+            except:
+                return default
+
+        # Extract basic data
         data = {
-            "Key": issue.key,
-            "Summary": issue.fields.summary,
-            "Status": issue.fields.status.name,
-            "Priority": issue.fields.priority.name,
+            "Key": key,
+            "Summary": safe_dict_get(fields, 'summary', default="No summary"),
+            "Status": safe_dict_get(fields, 'status', 'name', default="Unknown"),
+            "Priority": safe_dict_get(fields, 'priority', 'name', default="Unknown"),
             "Assignee": (
-                str(issue.fields.assignee) if issue.fields.assignee else "Unassigned"
+                safe_dict_get(fields, 'assignee', 'displayName', default="Unassigned")
+                if safe_dict_get(fields, 'assignee') else "Unassigned"
             ),
-            "Updated": issue.fields.updated[:10],
+            "Updated": str(safe_dict_get(fields, 'updated', default=""))[:10],
         }
 
         if include_details:
-            data.update(
-                {
-                    "Description": issue.fields.description,
-                    "Comments": (
-                        [c.body for c in issue.fields.comment.comments]
-                        if hasattr(issue.fields, "comment")
-                        else []
-                    ),
-                    "Resolution": (
-                        str(issue.fields.resolution)
-                        if issue.fields.resolution
-                        else None
-                    ),
-                }
-            )
+            # Extract description
+            description = safe_dict_get(fields, 'description')
+            if isinstance(description, dict) and 'content' in description:
+                # Handle ADF (Atlassian Document Format)
+                description_text = extract_text_from_adf(description)
+            else:
+                description_text = str(description) if description else None
+
+            # Extract comments
+            comments = []
+            comment_data = safe_dict_get(fields, 'comment')
+            if comment_data:
+                if isinstance(comment_data, dict) and 'comments' in comment_data:
+                    for comment in comment_data.get('comments', []):
+                        comment_body = comment.get('body', '')
+                        if isinstance(comment_body, dict) and 'content' in comment_body:
+                            # Handle ADF format
+                            comment_text = extract_text_from_adf(comment_body)
+                        else:
+                            comment_text = str(comment_body)
+                        if comment_text:
+                            comments.append(comment_text)
+                elif hasattr(comment_data, 'comments'):
+                    # Old format
+                    comments = [str(c.body) for c in comment_data.comments if hasattr(c, 'body')]
+
+            data.update({
+                "Description": description_text,
+                "Comments": comments[:3],  # Limit to first 3 comments
+                "Resolution": (
+                    safe_dict_get(fields, 'resolution', 'name')
+                    if safe_dict_get(fields, 'resolution') else None
+                ),
+            })
 
         return data
     except Exception as e:
-        logger.error(f"Error extracting ticket data for {issue.key}: {e}")
+        logger.error(f"Error extracting ticket data for {getattr(issue, 'key', 'unknown')}: {e}")
+        logger.error(f"Issue structure: {type(issue)}")
+        if hasattr(issue, 'fields'):
+            logger.error(f"Fields available: {list(issue.fields.keys()) if isinstance(issue.fields, dict) else dir(issue.fields)}")
         return None
+
+
+def extract_text_from_adf(adf_content):
+    """
+    Extracts plain text from Atlassian Document Format (ADF) content.
+    """
+    try:
+        if not isinstance(adf_content, dict):
+            return str(adf_content)
+        
+        def extract_text_recursive(node):
+            text_parts = []
+            
+            if isinstance(node, dict):
+                if node.get('type') == 'text':
+                    text_parts.append(node.get('text', ''))
+                elif 'content' in node:
+                    for child in node['content']:
+                        text_parts.append(extract_text_recursive(child))
+            elif isinstance(node, list):
+                for item in node:
+                    text_parts.append(extract_text_recursive(item))
+            
+            return ' '.join(filter(None, text_parts))
+        
+        return extract_text_recursive(adf_content).strip()
+    except Exception as e:
+        logger.error(f"Error extracting text from ADF: {e}")
+        return str(adf_content)
 
 
 def initialize_chat_agent():

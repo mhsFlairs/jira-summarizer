@@ -5,3 +5,4 @@ python-dotenv==1.1.0
 langchain==0.3.25
 langchain-openai==0.3.18
 langchain-community==0.3.24
+requests==2.31.0
